@@ -22,7 +22,7 @@ npx vitest run path/to/file.test.ts # focus on one file
 npx playwright test                 # default e2e config (port 5173)
 ```
 
-E2E specs live in `web/e2e/*.spec.ts`. Per-feature configs:
+E2E specs live in `e2e/*.spec.ts`. Per-feature configs:
 
 | Config                            | Purpose                 |
 | --------------------------------- | ----------------------- |
@@ -37,10 +37,12 @@ npx vue-tsc --noEmit
 ```
 
 The TS Session/SessionSummary types are hand-mirrored against the Go
-`internal/api/session_response.go` SessionResponse struct. The contract
-spec at `src/types/contract.spec.ts` enumerates every JSON tag and
-asserts the TS side mirrors it — adding a Go-side field without
-updating both fails the test.
+`internal/api/session_response.go` SessionResponse struct. That Go file
+lives in the separate **FlowState backend** repository; this frontend
+keeps a contract spec that must be updated by hand when the backend
+schema changes. The contract spec at `src/types/contract.spec.ts`
+enumerates every JSON tag and asserts the TS side mirrors it — adding a
+backend field without updating both files fails the test.
 
 ## Conventions
 

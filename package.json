@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:full": "concurrently -k \"npm run serve\" \"npm run dev\"",
-    "serve": "bash ../scripts/dev-server.sh",
+    "serve": "bash scripts/dev-server.sh",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
     "test:e2e": "playwright test",

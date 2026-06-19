@@ -22,7 +22,7 @@ export default defineConfig(({ mode }) => {
       // (internal/cli/serve.go:50-51 binds 127.0.0.1 by default). LAN
       // exposure was the previous default and is a security-posture
       // regression for users running `npm run dev` on shared networks.
-      // Set VITE_HOST=0.0.0.0 (or a specific interface) in web/.env.local
+      // Set VITE_HOST=0.0.0.0 (or a specific interface) in .env.local
       // to opt-in to LAN access — e.g. for testing the UI from a mobile
       // device on the same network.
       host: env.VITE_HOST || process.env.VITE_HOST || "0.0.0.0",
