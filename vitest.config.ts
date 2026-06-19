@@ -1,6 +1,6 @@
 import { defineConfig } from "vitest/config";
+import vue from "@vitejs/plugin-vue";
 import { fileURLToPath, URL } from "node:url";
-import viteConfig from "./vite.config";
 
 // Worker pool sizing for the vitest fork pool.
 //
@@ -24,7 +24,7 @@ import viteConfig from "./vite.config";
 // Override locally with `--maxWorkers=N` if a different trade-off is
 // needed for a one-off run.
 export default defineConfig({
-  ...viteConfig,
+  plugins: [vue()],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
