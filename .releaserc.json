@@ -1,0 +1,64 @@
+{
+  "branches": ["main"],
+  "repositoryUrl": "https://github.com/baphled/flowstate-web.git",
+  "plugins": [
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "conventionalcommits",
+        "releaseRules": [
+          { "type": "feat", "release": "minor" },
+          { "type": "fix", "release": "patch" },
+          { "type": "perf", "release": "patch" },
+          { "type": "refactor", "release": "patch" },
+          { "type": "docs", "release": false },
+          { "type": "test", "release": false },
+          { "type": "ci", "release": false },
+          { "type": "chore", "release": false },
+          { "breaking": true, "release": "major" }
+        ]
+      }
+    ],
+    [
+      "@semantic-release/release-notes-generator",
+      {
+        "preset": "conventionalcommits",
+        "presetConfig": {
+          "types": [
+            { "type": "feat", "section": "Features" },
+            { "type": "fix", "section": "Bug Fixes" },
+            { "type": "perf", "section": "Performance Improvements" },
+            { "type": "refactor", "section": "Code Refactoring" },
+            { "type": "docs", "section": "Documentation", "hidden": true },
+            { "type": "test", "section": "Tests", "hidden": true },
+            { "type": "ci", "section": "CI/CD", "hidden": true },
+            { "type": "chore", "section": "Maintenance", "hidden": true }
+          ]
+        }
+      }
+    ],
+    [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md",
+        "changelogTitle": "# flowstate-web Changelog\n\nAll notable changes to the flowstate-web project will be documented in this file."
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": ["CHANGELOG.md", "package.json", "package-lock.json"],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          { "path": "release-assets/flowstate-web-dist.tar.gz", "label": "flowstate-web dist (tar.gz)" },
+          { "path": "release-assets/flowstate-web-dist.zip", "label": "flowstate-web dist (zip)" }
+        ]
+      }
+    ]
+  ]
+}
