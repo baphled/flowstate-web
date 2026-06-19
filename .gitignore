@@ -3,3 +3,6 @@ dist/
 .playwright/
 playwright-report/
 test-results/
+
+# Local environment configuration
+.env.local
