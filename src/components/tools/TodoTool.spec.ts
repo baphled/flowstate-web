@@ -12,15 +12,14 @@ const ToolBubble = {
 }
 
 describe('TodoTool', () => {
-  // I4: Todos render as a checkbox list — always tabular. The subtitle
-  // already shows N active / M total so collapsed is fine and avoids the
-  // todo block dominating a busy thread.
-  it('starts collapsed by default (always-tabular category)', () => {
+  // Always-expanded per user request (June 2026): the todo widget shows
+  // the full checkbox list by default without requiring a click.
+  it('starts expanded by default', () => {
     const wrapper = mount(TodoTool, {
       props: { toolName: 'todowrite', heading: 'todowrite', body: '[]', status: 'completed' },
       global: { stubs: { ToolBubble } },
     })
-    expect(wrapper.get('[data-testid="tool-bubble"]').attributes('data-default-open')).toBe('false')
+    expect(wrapper.get('[data-testid="tool-bubble"]').attributes('data-default-open')).toBe('true')
   })
   it('renders todowrite JSON as a checkbox list', () => {
     const body = JSON.stringify([

@@ -2,10 +2,6 @@ import { describe, it, expect } from "vitest";
 import { mount } from "@vue/test-utils";
 import ReadTool from "./ReadTool.vue";
 
-const CopyButton = {
-  template: '<span data-testid="copy-btn" />',
-};
-
 const ToolBubble = {
   props: ["toolName", "title", "subtitle", "status", "defaultOpen"],
   template: `
@@ -18,10 +14,7 @@ const ToolBubble = {
 };
 
 describe("ReadTool", () => {
-  // I4: Read tool dumps full file content. Start collapsed so a chain of
-  // reads doesn't bury the assistant reply; the subtitle still surfaces
-  // the file path so the user knows what was read.
-  it("starts collapsed by default (file-content category)", () => {
+  it("uses the tool name as the card title", () => {
     const wrapper = mount(ReadTool, {
       props: {
         toolName: "read",
@@ -30,9 +23,44 @@ describe("ReadTool", () => {
         status: "completed",
       },
       global: {
-        stubs: { CopyButton, ToolBubble },
+        stubs: { ToolBubble },
       },
     });
+
+    expect(wrapper.get('[data-testid="tool-title"]').text()).toBe("read");
+  });
+
+  it("shows the full file path as the subtitle", () => {
+    const wrapper = mount(ReadTool, {
+      props: {
+        toolName: "read",
+        heading: "/tmp/example.txt",
+        body: "hello",
+        status: "completed",
+      },
+      global: {
+        stubs: { ToolBubble },
+      },
+    });
+
+    expect(wrapper.get('[data-testid="tool-subtitle"]').text()).toBe(
+      "/tmp/example.txt",
+    );
+  });
+
+  it("collapses the card by default", () => {
+    const wrapper = mount(ReadTool, {
+      props: {
+        toolName: "read",
+        heading: "/tmp/example.txt",
+        body: "hello",
+        status: "completed",
+      },
+      global: {
+        stubs: { ToolBubble },
+      },
+    });
+
     expect(
       wrapper
         .get('[data-testid="tool-bubble"]')
@@ -40,25 +68,7 @@ describe("ReadTool", () => {
     ).toBe("false");
   });
 
-  it("forces open when status is error", () => {
-    const wrapper = mount(ReadTool, {
-      props: {
-        toolName: "read",
-        heading: "/tmp/missing.txt",
-        body: "ENOENT",
-        status: "error",
-      },
-      global: {
-        stubs: { CopyButton, ToolBubble },
-      },
-    });
-    expect(
-      wrapper
-        .get('[data-testid="tool-bubble"]')
-        .attributes("data-default-open"),
-    ).toBe("true");
-  });
-  it("renders the tool bubble, subtitle, and file content", () => {
+  it("does not render file contents", () => {
     const wrapper = mount(ReadTool, {
       props: {
         toolName: "read",
@@ -67,26 +77,35 @@ describe("ReadTool", () => {
         status: "completed",
       },
       global: {
-        stubs: {
-          CopyButton,
-          ToolBubble,
-        },
+        stubs: { ToolBubble },
       },
     });
 
-    expect(
-      wrapper.get('[data-testid="tool-bubble"]').attributes("data-component"),
-    ).toBe("tool");
-    expect(
-      wrapper.get('[data-testid="tool-bubble"]').attributes("data-tool"),
-    ).toBe("read");
-    expect(wrapper.get('[data-testid="tool-subtitle"]').text()).toBe(
-      "/tmp/example.txt",
+    // The body/content is intentionally absent from the card
+    expect(wrapper.find('[data-component="read-content"]').exists()).toBe(
+      false,
     );
-    expect(wrapper.get('[data-component="read-tool"]').text()).toContain(
+    expect(wrapper.find('[data-component="read-tool"]').text()).not.toContain(
       "hello world",
     );
-    expect(wrapper.find('[data-testid="copy-btn"]').exists()).toBe(true);
+  });
+
+  it("shows the full path in the card body", () => {
+    const wrapper = mount(ReadTool, {
+      props: {
+        toolName: "read",
+        heading: "src/stores/chatStore.ts",
+        body: "some content",
+        status: "completed",
+      },
+      global: {
+        stubs: { ToolBubble },
+      },
+    });
+
+    expect(wrapper.get('[data-testid="read-file-path"]').text()).toBe(
+      "src/stores/chatStore.ts",
+    );
   });
 
   it("shows line range label when limit and offset are present in toolInput", () => {
@@ -103,10 +122,7 @@ describe("ReadTool", () => {
         }),
       },
       global: {
-        stubs: {
-          CopyButton,
-          ToolBubble,
-        },
+        stubs: { ToolBubble },
       },
     });
 
@@ -125,10 +141,7 @@ describe("ReadTool", () => {
         toolInput: JSON.stringify({ file_path: "/tmp/full.txt" }),
       },
       global: {
-        stubs: {
-          CopyButton,
-          ToolBubble,
-        },
+        stubs: { ToolBubble },
       },
     });
 

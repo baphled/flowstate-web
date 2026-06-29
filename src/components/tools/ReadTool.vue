@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import CopyButton from "./CopyButton.vue";
 import ToolBubble from "./ToolBubble.vue";
 import type { ToolRendererProps } from "./toolRendererProps";
 
@@ -8,10 +7,9 @@ const props = withDefaults(defineProps<ToolRendererProps>(), {
   status: "completed",
 });
 
-// UI Parity I4 (May 2026): file content is rarely what the user wants to
-// re-read inline. Start collapsed; subtitle still surfaces the file path.
-// Force open on error so missing-file / permission failures are visible.
-const cardDefaultOpen = computed(() => props.status === "error");
+// The heading carries the full file path (e.g. "/tmp/example.txt").
+// Show it as the subtitle so the user knows which file was read.
+// File contents are intentionally not displayed in the card.
 
 function parseToolInput(raw: string | undefined): Record<string, unknown> {
   if (!raw) return {};
@@ -40,28 +38,26 @@ const lineRange = computed(() => {
 </script>
 
 <template>
+  <!-- Read card: shows the full file path being read, without file contents. -->
   <ToolBubble
     :tool-name="props.toolName"
     :title="props.toolName"
     :subtitle="props.heading"
     :status="props.status"
-    :default-open="cardDefaultOpen"
+    :default-open="false"
   >
     <div class="tool-renderer" data-component="read-tool">
       <div class="tool-renderer__header">
-        <span class="tool-renderer__label">File contents</span>
+        <span class="tool-renderer__path" data-testid="read-file-path">{{
+          props.heading
+        }}</span>
         <span
           v-if="lineRange"
           class="tool-renderer__line-range"
           data-testid="line-range"
           >[{{ lineRange }}]</span
         >
-        <CopyButton :text="props.body" />
       </div>
-      <pre
-        class="tool-code tool-code--file"
-        data-component="read-content"
-      ><code>{{ props.body }}</code></pre>
     </div>
   </ToolBubble>
 </template>
@@ -79,33 +75,15 @@ const lineRange = computed(() => {
   gap: 0.75rem;
 }
 
-.tool-renderer__label {
+.tool-renderer__path {
   color: var(--text-secondary, #a9b1d6);
   font-size: 0.78rem;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-
-.tool-code {
-  margin: 0;
-  padding: 0.85rem 1rem;
-  border: 1px solid var(--border, rgba(148, 163, 184, 0.25));
-  border-radius: calc(var(--radius, 12px) - 4px);
-  background: var(--surface-low, #1a1b26);
-  color: var(--text-primary, #c0caf5);
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     "Courier New", monospace;
-  font-size: 0.85rem;
-  line-height: 1.5;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.tool-code--file {
-  max-height: 400px;
-  overflow-y: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tool-renderer__line-range {

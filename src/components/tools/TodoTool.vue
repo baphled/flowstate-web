@@ -111,12 +111,10 @@ const subtitle = computed(() => {
   return `${activeCount.value} active / ${entries.value.length} total`;
 });
 
-// UI Parity I4 (May 2026): the todo widget is always tabular and the
-// subtitle already shows N active / M total. Collapse-by-default keeps
-// the thread compact; users can expand to see the full checkbox list.
-// Todos do not have an error status path, but mirror the heuristic for
-// consistency with the rest of the tool surface.
-const cardDefaultOpen = computed(() => props.status === "error");
+// Always-expanded per user request (June 2026): the todo widget shows
+// the full checkbox list without requiring a click to disclose.
+// Removed the collapse-by-default behaviour that kept the thread compact.
+const cardDefaultOpen = computed(() => true);
 </script>
 
 <template>

@@ -3445,7 +3445,7 @@ describe('chatStore - assistant content around tool_call (no merge across tool b
     ])
   })
 
-  it('seals the in-flight assistant across multiple tool_call/tool_result pairs', () => {
+  it('seals the in-flight assistant across multiple tool_call/tool_result pairs, replacing the todo card in-place', () => {
     const store = useChatStore()
     store.currentSessionId = 'session-1'
 
@@ -3468,14 +3468,13 @@ describe('chatStore - assistant content around tool_call (no merge across tool b
       'All done.',
     ])
 
-    // Every assistant bubble between todo updates should be present and
-    // positioned between the tool_result rows in array order.
+    // The second todowrite replaces the first in-place, so only one
+    // tool_result remains. The latest content reflects the final state.
     const roles = store.messages.map((m) => m.role)
     expect(roles).toEqual([
       'assistant',
       'tool_result',
       'assistant',
-      'tool_result',
       'assistant',
     ])
   })

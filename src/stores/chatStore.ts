@@ -4358,6 +4358,23 @@ export const useChatStore = defineStore('chat', {
         status,
       }
 
+      // Todo-tool replacement (June 2026): when the agent emits a new
+      // todowrite/todo_update, replace the previous todo card in-place
+      // instead of pushing a new one. This keeps exactly one todo element
+      // per session — the latest emission replaces the previous one.
+      // Only pushes a new message when no prior todo card exists.
+      if (TODO_TOOL_NAMES.has(toolName)) {
+        const lastTodoIdx = [...this.messages].reverse().findIndex(
+          (m) => m.role === 'tool_result' && m.toolName !== undefined && TODO_TOOL_NAMES.has(m.toolName),
+        )
+        if (lastTodoIdx >= 0) {
+          const idx = this.messages.length - 1 - lastTodoIdx
+          // Preserve the original id so Vue reuses the component in-place
+          // rather than destroying and recreating it.
+          this.messages[idx] = { ...toolMessage, id: this.messages[idx].id }
+          return
+        }
+      }
       this.messages.push(toolMessage)
     },
 

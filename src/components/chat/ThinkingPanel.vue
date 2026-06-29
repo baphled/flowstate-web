@@ -14,7 +14,7 @@
  *   2. Routes the content through `MarkdownRenderer` so embedded
  *      code blocks get the same Shiki highlighting as the visible
  *      reply (B1 — already wired into MarkdownRenderer).
- *   3. Collapsed by default — reasoning is opt-in disclosure.
+ *   3. Always expanded — reasoning is visible by default per user request (June 2026).
  *
  * The component takes a single `content` prop. When a Message
  * carries a `thinkingBlocks[]` array (the better data source per
@@ -30,7 +30,7 @@ defineProps<{ content: string }>();
 </script>
 
 <template>
-  <details class="thinking-panel" data-testid="thinking-panel">
+  <details class="thinking-panel" open data-testid="thinking-panel">
     <summary class="thinking-panel__summary">
       <span class="thinking-panel__icon" aria-hidden="true">▸</span>
       <span class="thinking-panel__label">Thinking</span>
