@@ -36,10 +36,21 @@ export interface Message {
   timestamp: string;
   targetAgent?: string;
   chainId?: string;
+  /** targetSessionId from the backend — the child session ID for this delegation, stamped by the engine at message persist time. Used by loadSessionForDelegation for direct routing when the chainSessions map is empty (cold reload). */
+  childSessionId?: string;
   toolCalls?: number;
   lastTool?: string;
   status?: string;
   modelName?: string;
+  /**
+   * description carries the task/request text sent to a delegated agent.
+   * Set by the frontend's SSE handler (applyDelegationEvent) from the
+   * DelegationInfo.description field in the raw payload. Persisted only
+   * on the frontend-side Message — the backend's Message struct has no
+   * matching JSON field, so poll merges ({...existing, ...row}) preserve
+   * this value across session refreshes.
+   */
+  description?: string;
   /**
    * providerName carries the provider that produced this message
    * (e.g. "anthropic", "zai", "openai"), stamped by the engine on
@@ -90,6 +101,33 @@ export interface Message {
    * thinking-only degraded turn.
    */
   stopReason?: string;
+  /**
+   * Total turn duration in milliseconds. TWO stamping paths:
+   *
+   * 1. Backend (persistent): the streaming accumulator stamps this on
+   *    the assistant Message at flush time (time from accumulator
+   *    creation to content flush). Survives session reloads via
+   *    fetchSessionMessages because it is persisted on the Message JSON.
+   *
+   * 2. Frontend (live override): the chatStore's applyTurnMetadata
+   *    overwrites this with the TurnState's duration_ms (computed from
+   *    started_at → completed_at) after the live poll reaches a terminal
+   *    state. Slightly more accurate for the most-recent turn because it
+   *    uses the turn registry's wall clock; the backend-stamped value is
+   *    the fallback for historical turns viewed after a reload.
+   *
+   * Absent on non-assistant messages and on legacy messages persisted
+   * before this field existed.
+   */
+  durationMs?: number;
+  /**
+   * single tool-invocation duration in milliseconds. Stamped on the
+   * tool_result message by the chatStore after pairing a tool_call +
+   * tool_result by adjacency and computing their timestamp delta.
+   * Absent when the tool is still running or the timestamps were
+   * unavailable.
+   */
+  elapsedMs?: number;
 }
 
 export interface ChatRequest {

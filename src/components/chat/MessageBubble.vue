@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed } from "vue";
 import type { Message } from "@/types";
 import { useChatStore } from "@/stores/chatStore";
+import { useNow } from "@/composables/useNow";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 import ThinkingPanel from "./ThinkingPanel.vue";
 import PermissionPrompt from "./PermissionPrompt.vue";
@@ -45,65 +46,45 @@ const props = defineProps<{
 }>();
 
 const chatStore = useChatStore();
-const now = ref(Date.now());
-const elapsedTimer = ref<ReturnType<typeof setInterval> | null>(null);
+
+// Inline delegation cards — rendered in the chat thread like tool messages.
+// Clickable agent link to navigate to the child session. The live-ticking
+// duration chip on in-flight cards reads from a shared clock (useNow) that
+// ticks every second — a single module-level interval shared by all
+// MessageBubble instances, so in-flight cards don't create N timers.
+
+const { now } = useNow();
 
 async function loadDelegatedSession(): Promise<void> {
   if (!props.message.targetAgent) return;
-  // Bug Hunt (May 2026) sibling-confusion fix — pass the message's
-  // chainId alongside the targetAgent so the store can disambiguate
-  // sibling delegations to the same agent. Pre-fix the resolver was
-  // agent-id-only and silently routed clicks on an earlier delegation
-  // card to the most-recent sibling for the same agent.
   await chatStore.loadSessionForDelegation({
     chainId: props.message.chainId,
     agentId: props.message.targetAgent,
+    childSessionId: props.message.childSessionId,
   });
 }
 
-function startTimer(): void {
-  if (elapsedTimer.value !== null) return;
-  elapsedTimer.value = setInterval(() => {
-    now.value = Date.now();
-  }, 1000);
-}
-
-function stopTimer(): void {
-  if (elapsedTimer.value !== null) {
-    clearInterval(elapsedTimer.value);
-    elapsedTimer.value = null;
-  }
-}
-
-onMounted(() => {
-  // Only tick for in-flight delegation messages — elapsedLabel is only
-  // displayed there. Running an interval for every bubble in a long
-  // conversation burns CPU for no visible effect.
-  if (
-    props.message.role === "delegation_started" &&
-    props.message.status !== "completed"
-  ) {
-    startTimer();
-  }
-});
-
-onBeforeUnmount(() => {
-  stopTimer();
-});
-
 const elapsedLabel = computed(() => {
   const startedAt = Date.parse(props.message.timestamp);
-  if (Number.isNaN(startedAt)) {
-    return "0s";
-  }
+  if (Number.isNaN(startedAt)) return "0s";
   const seconds = Math.max(0, Math.floor((now.value - startedAt) / 1000));
-  if (seconds < 60) {
-    return `${seconds}s`;
-  }
-  const minutes = Math.floor(seconds / 60);
-  const remaining = seconds % 60;
-  return `${minutes}m ${remaining}s`;
+  return formatElapsed(seconds);
 });
+
+// Shared formatter: converts a duration in seconds to a human-readable label
+// like "3s", "2m 30s", "1h 15m". Used by both the live timer on in-flight
+// delegations and the static elapsed display on completed delegation
+// attachments.
+function formatElapsed(totalSeconds: number): string {
+  if (totalSeconds < 0) return "0s";
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const rem = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${rem}s`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return `${hours}h ${remMinutes}m`;
+}
 
 const hasProgress = computed(
   () =>
@@ -115,6 +96,24 @@ const isDelegationStarted = computed(
   () => props.message.role === "delegation_started",
 );
 const isDelegation = computed(() => props.message.role === "delegation");
+
+// Elapsed time for a completed delegation message, computed by finding
+// the paired delegation_started message (matched via chainId) and using
+// the delta between their timestamps. Returns undefined when there is no
+// matching started message (edge case: orphaned delegation on reload).
+const elapsedForDelegation = computed(() => {
+  const chainId = props.message.chainId;
+  if (!chainId) return undefined;
+  const started = chatStore.messages.find(
+    (m) => m.role === "delegation_started" && m.chainId === chainId,
+  );
+  if (!started?.timestamp || !props.message.timestamp) return undefined;
+  const startTs = Date.parse(started.timestamp);
+  const endTs = Date.parse(props.message.timestamp);
+  if (Number.isNaN(startTs) || Number.isNaN(endTs)) return undefined;
+  return Math.max(0, Math.floor((endTs - startTs) / 1000));
+});
+
 // B2 (May 2026). isThinking gates the new ThinkingPanel render path
 // only when there is something to show — either thinkingBlocks with
 // at least one non-empty thinking field, or non-empty content. A
@@ -630,7 +629,10 @@ async function handleRegenerate(): Promise<void> {
       :class="{ 'tool-invocation--denied': isDeniedByGate }"
       :data-denied="isDeniedByGate ? 'true' : undefined"
     >
-      <div v-if="showAgentChip || isDeniedByGate" class="tool-invocation-header">
+      <div
+        v-if="showAgentChip || isDeniedByGate || props.message.elapsedMs !== undefined"
+        class="tool-invocation-header"
+      >
         <span
           v-if="showAgentChip"
           class="tool-card-agent-chip"
@@ -655,6 +657,11 @@ async function handleRegenerate(): Promise<void> {
             Denied by runtime gate — tool not in this agent's allowed toolset
           </span>
         </span>
+        <span
+          v-if="props.message.elapsedMs !== undefined"
+          class="tool-card-elapsed"
+          data-testid="tool-card-elapsed"
+        >{{ formatElapsed(Math.round(props.message.elapsedMs / 1000)) }}</span>
       </div>
       <component
         :is="toolComponent"
@@ -689,58 +696,139 @@ async function handleRegenerate(): Promise<void> {
       data-testid="tool-error-renderer"
     />
 
+    <!--
+      Delegation cards — rendered inline in the chat thread like tool
+      messages. The started variant shows a live timer and progress;
+      the completed variant shows a summary. Clicking the agent name
+      navigates to the child session. Both use the same card chrome
+      (left accent border, elevated background) as tool invocations.
+    -->
     <div
       v-else-if="isDelegationStarted"
       class="delegation-card delegation-card--inflight"
+      data-testid="delegation-started-card"
     >
       <span
-        data-testid="delegation-spinner"
         class="delegation-spinner"
         aria-hidden="true"
-        >⋯</span
-      >
+        data-testid="delegation-spinner"
+      />
       <div class="delegation-body">
-        <div v-if="props.message.targetAgent" class="delegation-header">
+        <div class="delegation-header">
           <button
             type="button"
-            data-testid="delegation-agent-link"
             class="delegation-agent-link"
+            data-testid="delegation-agent-link"
             @click="loadDelegatedSession"
           >
-            {{ props.message.targetAgent }}
+            {{ props.message.targetAgent || "Agent" }}
           </button>
-          <span data-testid="delegation-elapsed" class="delegation-elapsed">{{
-            elapsedLabel
-          }}</span>
         </div>
-        <pre class="delegation-content">{{ props.message.content }}</pre>
-        <div
-          v-if="hasProgress"
-          data-testid="delegation-progress"
-          class="delegation-progress"
-        >
-          <span class="delegation-progress-count"
-            >{{ props.message.toolCalls ?? 0 }} tool calls</span
+        <p
+          v-if="props.message.description || props.message.content"
+          class="delegation-content"
+          data-testid="delegation-content"
+        >{{ props.message.description || props.message.content }}</p>
+        <div class="delegation-footer">
+          <div
+            v-if="hasProgress"
+            class="delegation-progress"
+            data-testid="delegation-progress"
           >
-          <span v-if="props.message.lastTool" class="delegation-progress-tool"
-            >· {{ props.message.lastTool }}</span
-          >
+            <span class="delegation-progress-count">
+              {{ props.message.toolCalls ?? 0 }} tool calls
+            </span>
+            <span
+              v-if="props.message.lastTool"
+              class="delegation-progress-tool"
+            >· {{ props.message.lastTool }}</span>
+          </div>
+          <div class="delegation-footer-end">
+            <span
+              v-if="props.message.modelName"
+              class="delegation-chip"
+              data-testid="delegation-model-chip"
+            >{{ props.message.modelName }}</span>
+            <span
+              v-if="props.message.providerName"
+              class="delegation-chip delegation-chip--provider"
+              data-testid="delegation-provider-chip"
+            >{{ props.message.providerName }}</span>
+            <div class="delegation-status-group">
+              <span
+                class="delegation-live-badge"
+                data-testid="delegation-live-badge"
+              >Live</span>
+              <span
+                class="delegation-elapsed"
+                data-testid="delegation-elapsed"
+              >{{ elapsedLabel }}</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
 
-    <div v-else-if="isDelegation" class="delegation-card delegation-card--done">
+    <!--
+      Completed delegation card — rendered inline in the chat thread like
+      the in-flight variant, but with a checkmark and static elapsed time
+      instead of a spinner and live timer. Clicking the agent name
+      navigates to the child session.
+    -->
+    <div
+      v-else-if="isDelegation"
+      class="delegation-card delegation-card--done"
+      data-testid="delegation-completed-card"
+    >
+      <span class="delegation-done-marker" aria-hidden="true">&#x2713;</span>
       <div class="delegation-body">
-        <button
-          v-if="props.message.targetAgent"
-          type="button"
-          data-testid="delegation-agent-link"
-          class="delegation-agent-link"
-          @click="loadDelegatedSession"
-        >
-          {{ props.message.targetAgent }}
-        </button>
-        <pre class="delegation-content">{{ props.message.content }}</pre>
+        <div class="delegation-header">
+          <button
+            type="button"
+            class="delegation-agent-link"
+            data-testid="delegation-completed-agent-link"
+            @click="loadDelegatedSession"
+          >
+            {{ props.message.targetAgent || "Agent" }}
+          </button>
+        </div>
+        <p
+          v-if="props.message.description || props.message.content"
+          class="delegation-content"
+          data-testid="delegation-content"
+        >{{ props.message.description || props.message.content }}</p>
+        <div class="delegation-footer">
+          <div
+            v-if="hasProgress"
+            class="delegation-progress"
+            data-testid="delegation-progress"
+          >
+            <span class="delegation-progress-count">
+              {{ props.message.toolCalls ?? 0 }} tool calls
+            </span>
+            <span
+              v-if="props.message.lastTool"
+              class="delegation-progress-tool"
+            >· {{ props.message.lastTool }}</span>
+          </div>
+          <div class="delegation-footer-end">
+            <span
+              v-if="props.message.modelName"
+              class="delegation-chip"
+              data-testid="delegation-model-chip"
+            >{{ props.message.modelName }}</span>
+            <span
+              v-if="props.message.providerName"
+              class="delegation-chip delegation-chip--provider"
+              data-testid="delegation-provider-chip"
+            >{{ props.message.providerName }}</span>
+            <span
+              v-if="elapsedForDelegation !== undefined"
+              class="delegation-elapsed"
+              data-testid="delegation-elapsed"
+            >{{ formatElapsed(elapsedForDelegation) }}</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1012,100 +1100,7 @@ async function handleRegenerate(): Promise<void> {
   border: none;
 }
 
-/* Delegation cards: inline within main chat. */
-.message-bubble.delegation,
-.message-bubble.delegation_started {
-  align-self: stretch;
-  max-width: 100%;
-  padding: 0;
-  background: transparent;
-  border: none;
-}
 
-.delegation-card {
-  display: flex;
-  gap: 0.5rem;
-  align-items: flex-start;
-  padding: 0.5rem 0.75rem;
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--event-delegation, var(--accent));
-  border-radius: var(--radius);
-  background: var(--bg-elevated, transparent);
-}
-
-.delegation-card--inflight {
-  border-left-color: var(--accent, #7aa2f7);
-}
-
-.delegation-content {
-  margin: 0;
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  font-family: inherit;
-  flex: 1;
-}
-
-.delegation-spinner {
-  display: inline-block;
-  color: var(--accent, #7aa2f7);
-  font-weight: 700;
-  animation: pulse 1.2s ease-in-out infinite;
-}
-
-.delegation-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  flex: 1;
-  min-width: 0;
-}
-
-.delegation-header {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  font-size: 0.75rem;
-}
-
-.delegation-agent-link {
-  color: var(--accent, #7aa2f7);
-  font-weight: 600;
-  text-decoration: none;
-  border-bottom: 1px dotted var(--accent, #7aa2f7);
-}
-
-.delegation-agent-link:hover {
-  border-bottom-style: solid;
-}
-
-.delegation-elapsed {
-  color: var(--text-muted);
-  font-size: 0.7rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.delegation-progress {
-  display: flex;
-  gap: 0.4rem;
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.delegation-progress-tool {
-  color: var(--event-tool-call, var(--text-secondary));
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.4;
-  }
-  50% {
-    opacity: 1;
-  }
-}
 
 .thinking {
   font-style: italic;
@@ -1324,4 +1319,216 @@ async function handleRegenerate(): Promise<void> {
   border-left: 2px solid var(--error, var(--danger, #f87171));
   padding-left: 0.5rem;
 }
+
+/* Delegation cards — rendered inline in the chat thread like tool
+ * messages. Same elevated card chrome as tool invocations: left accent
+ * border, subtle background, compact font. The in-flight variant uses
+ * a green left border + live badge; the done variant uses the default
+ * accent colour and omits the timer. */
+.message-bubble.delegation,
+.message-bubble.delegation_started {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
+.delegation-card {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--event-delegation, var(--accent));
+  border-radius: var(--radius);
+  background: var(--bg-elevated, transparent);
+  font-size: 0.8rem;
+}
+
+.delegation-card--inflight {
+  border-left-color: var(--accent-success, #4ade80);
+}
+
+.delegation-card--done {
+  border-left-color: var(--accent);
+}
+
+.delegation-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-top: 3px;
+  border: 2px solid var(--accent-success, #4ade80);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: delegation-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes delegation-spin {
+  to { transform: rotate(360deg); }
+}
+
+.delegation-done-marker {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  color: var(--accent-success, #4ade80);
+  font-weight: 700;
+  font-size: 0.75rem;
+}
+
+.delegation-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.delegation-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.delegation-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.68rem;
+}
+
+.delegation-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.08rem 0.4rem;
+  border-radius: var(--radius);
+  background: var(--bg-secondary, transparent);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.02em;
+}
+
+/* Provider variant — same chip chrome, dimmer color so the pair reads as
+ * "model [primary] | provider [secondary]" without a new visual register. */
+.delegation-chip--provider {
+  color: var(--text-muted);
+}
+
+/* Tool-card elapsed chip — compact duration display for a single tool
+ * invocation. Same visual register as the agent chip in the same header,
+ * so they sit side by side without competing. */
+.tool-card-elapsed {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.08rem 0.4rem;
+  border-radius: var(--radius);
+  background: var(--bg-secondary, transparent);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.delegation-agent-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+  border-bottom: 1px dotted var(--accent);
+  cursor: pointer;
+  background: none;
+  padding: 0;
+  font: inherit;
+}
+
+.delegation-agent-link:hover {
+  border-bottom-style: solid;
+}
+
+.delegation-elapsed {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.delegation-live-badge {
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent-success, #4ade80);
+  border: 1px solid var(--accent-success, #4ade80);
+  padding: 0 0.3rem;
+  border-radius: 3px;
+}
+
+.delegation-content {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.delegation-progress {
+  display: flex;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/*
+ * OMO-format delegation card footer: left-aligns the tool progress,
+ * right-aligns the status group (Live badge + elapsed timer) using
+ * flexbox space-between. Keeps the two groups on one visual row.
+ */
+.delegation-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
+}
+
+.delegation-status-group {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+/*
+ * Footer-end groups the model chip + status group on the right side of the
+ * footer, while progress stays left. Flexbox with gap between the two.
+ */
+.delegation-footer-end {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.delegation-progress-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.delegation-progress-tool {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 </style>
