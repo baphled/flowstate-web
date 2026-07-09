@@ -36,22 +36,25 @@ vi.mock('@/api', async (importOriginal) => {
   }
 })
 
-vi.mock('@/stores/swarmStore', () => {
+vi.mock('@/stores/swarmStore', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('@/stores/swarmStore')>()
+  // Module-level spies shared across every useSwarmStore() call so the
+  // reattach tests (which import dynamically) and ChatView's onMounted /
+  // session watcher (which calls the module's useSwarmStore() directly)
+  // all observe the same spy instances for call-count assertions.
   const connect = vi.fn()
   const disconnect = vi.fn()
   const clear = vi.fn()
   return {
-    useSwarmStore: () => ({
-      connect,
-      disconnect,
-      clear,
-      events: [],
-      delegationEvents: [],
-      harnessEvents: [],
-      planEvents: [],
-      statusEvents: [],
-      reviewEvents: [],
-    }),
+    ...mod,
+    useSwarmStore: () => {
+      const store = mod.useSwarmStore()
+      // Override network-touching methods with module-level spies.
+      store.connect = connect
+      store.disconnect = disconnect
+      store.clear = clear
+      return store
+    },
   }
 })
 
@@ -278,8 +281,10 @@ describe('ChatView auto-scroll', () => {
 
     chatStore.messages[0].content = 'hello world'
     await nextTick()
-    // Flush the requestAnimationFrame scheduled by scheduleInstantScroll
-    vi.runAllTimers()
+    // Flush the requestAnimationFrame scheduled by scheduleInstantScroll.
+    // Advance by 2s to cover the interval tick + rAF without hitting an
+    // infinite loop from the inline delegation card's setInterval.
+    vi.advanceTimersByTime(2000)
     await nextTick()
 
     expect(scrollToSpy).toHaveBeenCalledWith({ top: 1000, behavior: 'instant' })
@@ -608,8 +613,13 @@ describe('ChatView scroll-to-bottom button (QW-9)', () => {
 })
 
 describe('ChatView side panel reorganisation', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     setActivePinia(createPinia())
+    // The mock stores events in a module-scoped SHARED array that persists
+    // across pinia resets. Between tests we must empty it so the store
+    // starts with a clean slate.
+    const { useSwarmStore } = await import('@/stores/swarmStore')
+    useSwarmStore().events.length = 0
   })
 
   it('mounts the TodoListPanel inside the swarm pane', async () => {
@@ -662,18 +672,16 @@ describe('ChatView side panel reorganisation', () => {
     expect(sidebar.exists()).toBe(true)
     // Tool-calls and plan content are no longer surfaced in the side panel —
     // the side panel is reserved for todos. Their data flow continues through
-    // the chat thread (tool messages) and DelegationStrip (delegation events).
+    // the chat thread (tool messages + inline delegation cards).
     expect(sidebar.find('[data-testid="tool-call-panel"]').exists()).toBe(false)
     expect(sidebar.find('[data-testid="plan-panel"]').exists()).toBe(false)
   })
 
-  // UX consolidation (May 2026) — DelegationStrip removed entirely. The
-  // transient swarm-bus pulse strip never shipped as a useful affordance:
-  // the persistent ChildSessionsPanel already surfaces every delegated
-  // child, and DelegationPanel still shows raw swarm events in the swarm
-  // pane. This pin guards the removal so a future refactor can't quietly
-  // re-mount the legacy strip.
-  it('does not mount the legacy DelegationStrip anywhere in the chat region', async () => {
+  // Delegation rendering happens inline in MessageBubble — delegation_started
+  // renders as a live in-flight card; completed delegation messages render as
+  // their own standalone completed-delegation card in the thread. There is no
+  // separate DelegationStrip component; this guard ensures it stays that way.
+  it('does not mount a separate DelegationStrip component', async () => {
     const wrapper = mount(ChatView, {
       global: {
         stubs: {
@@ -1054,6 +1062,58 @@ describe('ChatView agent-activity indicator', () => {
     chatStore.currentProviderId = ''
     await wrapper.vm.$nextTick()
 
+    expect(wrapper.find('[data-testid="agent-activity-model"]').exists()).toBe(false)
+  })
+
+  it('shows concurrent delegated agent actions in the activity indicator when delegations are in-flight', async () => {
+    const wrapper = mount(ChatView, {
+      global: {
+        stubs: {
+          MessageInput: { template: '<div data-testid="message-input-stub"></div>' },
+          ContextToolGroup: { template: '<div data-testid="context-tool-group-stub"></div>' },
+        },
+      },
+    })
+    await flushPromises()
+
+    const chatStore = useChatStore()
+    chatStore.isStreaming = true
+    chatStore.agentId = 'team-lead'
+    // Add two concurrent active delegations
+    const msg1 = {
+      id: 'msg-1',
+      role: 'delegation_started',
+      content: 'Implement the user model',
+      targetAgent: 'planner',
+      chainId: 'chain-1',
+      lastTool: 'read',
+      toolCalls: 3,
+      timestamp: new Date().toISOString(),
+    }
+    const msg2 = {
+      id: 'msg-2',
+      role: 'delegation_started',
+      content: 'Build API routes',
+      targetAgent: 'coder',
+      chainId: 'chain-2',
+      lastTool: 'write',
+      toolCalls: 2,
+      timestamp: new Date().toISOString(),
+    }
+    ;(chatStore as any).messages = [msg1, msg2]
+    await wrapper.vm.$nextTick()
+
+    const container = wrapper.find('[data-testid="agent-activity-delegations"]')
+    expect(container.exists()).toBe(true)
+
+    const chips = wrapper.findAll('[data-testid="agent-activity-delegation"]')
+    expect(chips).toHaveLength(2)
+    expect(chips[0].text()).toContain('planner')
+    expect(chips[0].text()).toContain('read')
+    expect(chips[1].text()).toContain('coder')
+    expect(chips[1].text()).toContain('write')
+
+    // Model fallback chip should NOT appear when delegations are active
     expect(wrapper.find('[data-testid="agent-activity-model"]').exists()).toBe(false)
   })
 

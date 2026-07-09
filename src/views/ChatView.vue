@@ -19,7 +19,6 @@ import MessageBubble from '@/components/chat/MessageBubble.vue'
 import MessageInput from '@/components/chat/MessageInput.vue'
 import QueuedPromptStrip from '@/components/chat/QueuedPromptStrip.vue'
 import TodoListPanel from '@/components/chat/TodoListPanel.vue'
-import ChildSessionsPanel from '@/components/chat/ChildSessionsPanel.vue'
 import EmptyChatState from '@/components/chat/EmptyChatState.vue'
 import AgentPicker from '@/components/agent-picker/AgentPicker.vue'
 import ModelPicker from '@/components/model-picker/ModelPicker.vue'
@@ -73,7 +72,9 @@ async function goToParentSession(): Promise<void> {
 }
 
 const groupedMessages = computed<GroupedMessageEntry[]>(() =>
-  groupContextTools(collapseToolPairs(chatStore.messages)),
+  groupContextTools(
+    collapseToolPairs(chatStore.messages),
+  ),
 )
 
 // UI Parity bug-fix bundle (May 2026). P2-9: precompute the per-bubble
@@ -120,6 +121,29 @@ function precedingUserPromptFor(messageId: string): { id: string; content: strin
 // (here) vs list-rendering (those three components); see plan §R8 for
 // the drift-risk note and the future-work item to consolidate.
 const activeStreamingState = computed(() => chatStore.streamingFor(chatStore.currentSessionId))
+
+// Active delegations for the activity indicator. When the current session
+// has in-flight delegations (delegation_started without matching delegation),
+// these show the agent name and latest tool action instead of the model info.
+// Multiple concurrent agents show as a comma-separated list. Falls back to
+// model info ("on model · provider") during regular streaming.
+const activeDelegations = computed(() => {
+  const messages = chatStore.messages
+  // Collect completed chainIds so we know which delegations are still live.
+  const completedChainIds = new Set<string>()
+  for (const msg of messages) {
+    if (msg.role === "delegation" && msg.chainId) {
+      completedChainIds.add(msg.chainId)
+    }
+  }
+  return messages.filter(
+    (msg) =>
+      msg.role === "delegation_started" &&
+      msg.chainId &&
+      !completedChainIds.has(msg.chainId),
+  )
+})
+
 // UI Parity PR5 — Live token counter (May 2026).
 //
 // The engine threads cumulative output_tokens onto every
@@ -382,10 +406,26 @@ function closeKeyboardHelp(): void {
 // value. 'auto' is the no-op default — buttons only set 'expanded' or
 // 'collapsed' so the per-card state remains intact when the user later
 // toggles a single card.
+/**
+ * formatElapsed converts a duration in seconds to a short human-readable
+ * label ("3s", "2m 30s", "1h 15m"). Mirrors the same-named function in
+ * MessageBubble.vue so the per-bubble metadata row below each assistant
+ * message can display the turn's elapsed time without re-importing.
+ */
+function formatElapsed(totalSeconds: number): string {
+  if (totalSeconds < 0) return '0s'
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const rem = totalSeconds % 60
+  if (minutes < 60) return `${minutes}m ${rem}s`
+  const hours = Math.floor(minutes / 60)
+  const remMinutes = minutes % 60
+  return `${hours}h ${remMinutes}m`
+}
+
 function expandAllToolCards(): void {
   chatStore.toolCardOpenOverride = 'expanded'
 }
-
 function collapseAllToolCards(): void {
   chatStore.toolCardOpenOverride = 'collapsed'
 }
@@ -553,12 +593,41 @@ onBeforeUnmount(() => {
           <EmptyChatState v-if="groupedMessages.length === 0" />
           <div v-else class="message-list" data-testid="message-list">
             <template v-for="(entry, index) in groupedMessages" :key="entry.type === 'message' ? entry.message.id : `context-group-${index}`">
-              <MessageBubble
-                v-if="entry.type === 'message'"
-                :message="entry.message"
-                :agent-name="agentNameFor(entry.message)"
-                :preceding-user-prompt="precedingUserPromptFor(entry.message.id)"
-              />
+              <template v-if="entry.type === 'message'">
+                <MessageBubble
+                  :message="entry.message"
+                  :agent-name="agentNameFor(entry.message)"
+                  :preceding-user-prompt="precedingUserPromptFor(entry.message.id)"
+                />
+                <!--
+                  Turn-metadata row: duration + model/provider chips rendered
+                  BELOW the assistant message bubble (not inside it). Stamped
+                  by chatStore.pollTurnUntilTerminal when the Turn reaches a
+                  terminal state. Only shown on assistant messages that carry
+                  the data.
+                -->
+                <div
+                  v-if="entry.message.role === 'assistant' && (entry.message.durationMs !== undefined || entry.message.modelName)"
+                  class="message-metadata"
+                  data-testid="message-metadata"
+                >
+                  <span
+                    v-if="entry.message.durationMs !== undefined"
+                    class="message-duration"
+                    data-testid="message-duration"
+                  >{{ formatElapsed(Math.round(entry.message.durationMs / 1000)) }}</span>
+                  <span
+                    v-if="entry.message.modelName"
+                    class="message-model-chip"
+                    data-testid="message-model-chip"
+                  >{{ entry.message.modelName }}</span>
+                  <span
+                    v-if="entry.message.providerName"
+                    class="message-provider-chip"
+                    data-testid="message-provider-chip"
+                  >{{ entry.message.providerName }}</span>
+                </div>
+              </template>
               <ContextToolGroup
                 v-else-if="entry.type === 'context-group'"
                 :messages="entry.messages"
@@ -601,18 +670,6 @@ onBeforeUnmount(() => {
           </svg>
         </button>
       </div>
-
-      <!--
-        ChildSessionsPanel surfaces persistent children of the current
-        session derived from chatStore.sessions. Auto-hides when there are
-        no children. The legacy DelegationStrip (transient swarm-bus pulse
-        view) was removed in the UX consolidation (May 2026): its
-        in-thread delegation list duplicated this panel's job, the pulses
-        vanished on reload, and DelegationPanel still surfaces raw swarm
-        events in the swarm pane for users who want them.
-      -->
-      <ChildSessionsPanel />
-
       <!--
         The toolbar is rendered in the same DOM position for both parent and
         child sessions so the bar layout doesn't shift on navigation. In a
@@ -689,14 +746,12 @@ onBeforeUnmount(() => {
       />
 
       <!--
-        Track B — model+provider visibility during streaming.
-        The activity-indicator label now includes the active model and
-        provider when both are known, so the user can see at a glance
-        WHICH model is producing the answer they're watching arrive.
-        After a failover (provider_changed SSE event), the chatStore
-        updates currentProviderId/currentModelId so this label
-        reflects the new active model immediately — paired with the
-        transient toast that announces the switch.
+        Activity indicator — shown during streaming or loading (delegation).
+        When a delegation is in-flight, the indicator shows the delegated
+        agent's most recent action (agent · tool — content) instead of model
+        info, since the delegation card already carries the model chip and
+        showing it twice is redundant. During regular streaming the model
+        info fallback ("on model · provider") is preserved.
       -->
       <div
         v-if="activeStreamingState.isStreaming || activeStreamingState.isLoading"
@@ -708,7 +763,22 @@ onBeforeUnmount(() => {
         <span class="agent-activity-dot" aria-hidden="true" />
         <span class="agent-activity-label">{{ chatStore.agentId }} is working…</span>
         <span
-          v-if="chatStore.currentModelId || chatStore.currentProviderId"
+          v-if="activeDelegations.length > 0"
+          class="agent-activity-delegations"
+          data-testid="agent-activity-delegations"
+        >
+          <span
+            v-for="(del, idx) in activeDelegations"
+            :key="del.chainId || idx"
+            class="agent-activity-delegation"
+            data-testid="agent-activity-delegation"
+          >
+            <template v-if="idx > 0">, </template>
+            → {{ del.targetAgent || "Agent" }}<template v-if="del.lastTool"> · {{ del.lastTool }}</template><template v-if="del.content"> — {{ del.content }}</template>
+          </span>
+        </span>
+        <span
+          v-else-if="chatStore.currentModelId || chatStore.currentProviderId"
           class="agent-activity-model"
           data-testid="agent-activity-model"
         >
@@ -1100,5 +1170,54 @@ onBeforeUnmount(() => {
 .sidebar-panels,
 .message-pane {
   min-height: 0;
+}
+
+/* Turn-metadata row: rendered BELOW each assistant message bubble (not inside
+ * it). Shows the turn's elapsed duration and the model/provider that produced
+ * it. Right-aligned, muted register — secondary to the message body. */
+.message-metadata {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  justify-content: flex-end;
+  margin-top: 0.15rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.message-duration {
+  color: var(--text-muted);
+}
+
+/* Model chip in the per-turn metadata row. Compact chip visual matching the
+ * delegation-chip tokens so the model label looks consistent across all
+ * surfaces — same font size, border radius, and background. */
+.message-model-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.06rem 0.4rem;
+  border-radius: var(--radius);
+  background: var(--bg-secondary, transparent);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.02em;
+}
+
+.message-provider-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.06rem 0.4rem;
+  border-radius: var(--radius);
+  background: var(--bg-secondary, transparent);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.02em;
 }
 </style>
