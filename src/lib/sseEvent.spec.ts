@@ -162,6 +162,36 @@ describe("parseSSEPayload", () => {
     }
   });
 
+  it("parses model_name and provider_name from delegation payload", () => {
+    const payload = JSON.stringify({
+      type: "delegation",
+      target_agent: "executor",
+      chain_id: "chain-1",
+      model_name: "gpt-4",
+      provider_name: "openai",
+    });
+    const ev = parseSSEPayload(payload);
+    expect(ev.kind).toBe("delegation");
+    if (ev.kind === "delegation") {
+      expect(ev.modelName).toBe("gpt-4");
+      expect(ev.providerName).toBe("openai");
+    }
+  });
+
+  it("omits modelName and providerName when absent", () => {
+    const payload = JSON.stringify({
+      type: "delegation",
+      target_agent: "executor",
+      chain_id: "chain-1",
+    });
+    const ev = parseSSEPayload(payload);
+    expect(ev.kind).toBe("delegation");
+    if (ev.kind === "delegation") {
+      expect(ev.modelName).toBeUndefined();
+      expect(ev.providerName).toBeUndefined();
+    }
+  });
+
   it("classifies harness_retry, harness_attempt_start, harness_complete, harness_critic_feedback by type", () => {
     expect(parseSSEPayload('{"type":"harness_retry","content":"r"}').kind).toBe(
       "harness_retry",

@@ -317,6 +317,7 @@ export interface TurnState {
   status: "running" | "completed" | "failed";
   started_at: string;
   completed_at: string | null;
+  duration_ms?: number;
   model: TurnStateModel;
   error: string;
   messages: Message[];

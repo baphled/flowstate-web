@@ -153,6 +153,13 @@ export interface SSEDelegationEvent {
   toolCalls?: number;
   lastTool?: string;
   status?: string;
+  /** Task description sent by the backend (DelegationInfo.Description). */
+  description?: string;
+  sourceAgent?: string;
+  /** Model the delegated agent is running under (DelegationInfo.ModelName). */
+  modelName?: string;
+  /** Provider hosting the delegated agent (DelegationInfo.ProviderName). */
+  providerName?: string;
 }
 
 export interface SSEHarnessRetryEvent {
@@ -670,6 +677,22 @@ export function parseSSEPayload(payload: string): SSEEvent {
       status:
         typeof obj["status"] === "string"
           ? (obj["status"] as string)
+          : undefined,
+      description:
+        typeof obj["description"] === "string"
+          ? (obj["description"] as string)
+          : undefined,
+      sourceAgent:
+        typeof obj["source_agent"] === "string"
+          ? (obj["source_agent"] as string)
+          : undefined,
+      modelName:
+        typeof obj["model_name"] === "string"
+          ? (obj["model_name"] as string)
+          : undefined,
+      providerName:
+        typeof obj["provider_name"] === "string"
+          ? (obj["provider_name"] as string)
           : undefined,
     };
   }
