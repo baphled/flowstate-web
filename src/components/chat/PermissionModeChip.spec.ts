@@ -118,7 +118,7 @@ describe("PermissionModeChip", () => {
 
     // Resting state — popover absent.
     expect(
-      wrapper.find('[data-testid="permission-mode-chip-popover"]').exists(),
+      (wrapper.find('[data-testid="permission-mode-chip-popover"]') as any).exists(),
     ).toBe(false);
 
     await wrapper.get('[data-testid="permission-mode-chip"]').trigger("click");
@@ -230,7 +230,7 @@ describe("PermissionModeChip", () => {
     const disclosure = wrapper.get(
       '[data-testid="permission-mode-default-disclosure"]',
     );
-    expect(disclosure.exists()).toBe(true);
+    expect((disclosure as any).exists()).toBe(true);
     // Literal text per plan §5 — pinning the exact copy guards against
     // a future restyle silently weakening the disclosure.
     expect(disclosure.text()).toBe(

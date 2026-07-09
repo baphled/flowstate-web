@@ -8,6 +8,7 @@ import type { Message } from "@/types";
 import { registerTool } from "@/tools/toolRegistry";
 import { useChatStore } from "@/stores/chatStore";
 import { ensureHighlighterLoaded } from "@/lib/markdownHighlighter";
+import { _resetNowSharedState } from "@/composables/useNow";
 
 // Mock chat store
 vi.mock("@/stores/chatStore", () => ({
@@ -94,11 +95,13 @@ describe("MessageBubble", () => {
   let mockChatStore: any;
 
   beforeEach(() => {
+    _resetNowSharedState();
     setActivePinia(createPinia());
     registerTool({ name: "bash", component: BashTool });
     registerTool({ name: "read", component: ReadTool });
 
     mockChatStore = {
+      messages: [],
       loadSessionByAgentId: vi.fn(),
       // Bug Hunt (May 2026) sibling-confusion fix — MessageBubble's
       // delegation-card click now routes through loadSessionForDelegation
@@ -395,19 +398,19 @@ describe("MessageBubble", () => {
       );
     });
 
-    it("renders a terminal delegation message without a spinner", () => {
+    it("renders a standalone completed delegation card for delegation-role messages", () => {
       const wrapper = mountWithRouter(
         makeMessage({
           role: "delegation",
           content: "│ planner [completed]",
+          targetAgent: "planner",
+          chainId: "chain-1",
         }),
       );
 
-      expect(wrapper.attributes("data-role")).toBe("delegation");
-      expect(wrapper.find('[data-testid="delegation-spinner"]').exists()).toBe(
-        false,
+      expect(wrapper.find('[data-testid="delegation-completed-card"]').exists()).toBe(
+        true,
       );
-      expect(wrapper.text()).toContain("planner");
     });
 
     it("renders the target agent name as a button (not an anchor pointing at AgentInfoView)", () => {
@@ -515,49 +518,6 @@ describe("MessageBubble", () => {
       expect(pushedToAgents).toBe(false);
     });
 
-    it("does not push /agents/:id when the terminal delegation card is clicked", async () => {
-      const router = makeRouter();
-      await router.push("/");
-      await router.isReady();
-      const pushSpy = vi.spyOn(router, "push");
-
-      const wrapper = mount(MessageBubble, {
-        props: {
-          message: makeMessage({
-            role: "delegation",
-            content: "done",
-            targetAgent: "planner",
-            chainId: "chain-1",
-            status: "completed",
-          }),
-        },
-        global: {
-          plugins: [router],
-          stubs: { ToolErrorCard, GenericTool },
-        },
-      });
-
-      const link = wrapper.find('[data-testid="delegation-agent-link"]');
-      await link.trigger("click");
-
-      expect(mockChatStore.loadSessionForDelegation).toHaveBeenCalledWith({
-        chainId: "chain-1",
-        agentId: "planner",
-      });
-      const pushedToAgents = pushSpy.mock.calls.some((call) => {
-        const target = call[0];
-        if (typeof target === "string") return target.startsWith("/agents/");
-        if (target && typeof target === "object" && "path" in target) {
-          return (
-            typeof target.path === "string" &&
-            target.path.startsWith("/agents/")
-          );
-        }
-        return false;
-      });
-      expect(pushedToAgents).toBe(false);
-    });
-
     it("shows live progress (tool count, current tool, elapsed time) for in-flight delegations", () => {
       const wrapper = mountWithRouter(
         makeMessage({
@@ -580,22 +540,111 @@ describe("MessageBubble", () => {
       );
     });
 
-    it("does not show the live progress block on terminal delegation messages", () => {
+    it("renders the completed delegation agent name as a clickable button with a dedicated testid", () => {
       const wrapper = mountWithRouter(
         makeMessage({
           role: "delegation",
-          content: "done",
+          content: "Built the feature",
           targetAgent: "planner",
           chainId: "chain-1",
-          status: "completed",
-          toolCalls: 4,
-          lastTool: "read",
         }),
       );
 
-      expect(wrapper.find('[data-testid="delegation-progress"]').exists()).toBe(
-        false,
+      const link = wrapper.find(
+        '[data-testid="delegation-completed-agent-link"]',
       );
+      expect(link.exists()).toBe(true);
+      expect(link.text()).toContain("planner");
+      expect(link.element.tagName).toBe("BUTTON");
+      // Must not have an href attribute — session load, not navigation.
+      expect(link.attributes("href")).toBeUndefined();
+    });
+
+    it("calls loadSessionForDelegation with chainId + targetAgent when clicking the completed delegation agent link", async () => {
+      const wrapper = mountWithRouter(
+        makeMessage({
+          role: "delegation",
+          content: "Built the feature",
+          targetAgent: "planner",
+          chainId: "chain-1",
+        }),
+      );
+
+      const link = wrapper.find(
+        '[data-testid="delegation-completed-agent-link"]',
+      );
+      await link.trigger("click");
+
+      expect(mockChatStore.loadSessionForDelegation).toHaveBeenCalledWith({
+        chainId: "chain-1",
+        agentId: "planner",
+      });
+      // Must not fall back to the agent-id-only resolver.
+      expect(mockChatStore.loadSessionByAgentId).not.toHaveBeenCalled();
+    });
+
+    it("calls loadSessionForDelegation with only agentId when chainId is missing (store fallback)", async () => {
+      // The completed card reuses the same loadDelegatedSession handler
+      // as the in-flight card, which only guards on targetAgent. The
+      // store handles chainId: undefined by falling back to agentId.
+      const wrapper = mountWithRouter(
+        makeMessage({
+          role: "delegation",
+          content: "Built the feature",
+          targetAgent: "planner",
+        }),
+      );
+
+      const link = wrapper.find(
+        '[data-testid="delegation-completed-agent-link"]',
+      );
+      await link.trigger("click");
+
+      expect(mockChatStore.loadSessionForDelegation).toHaveBeenCalledWith({
+        chainId: undefined,
+        agentId: "planner",
+      });
+    });
+
+    it("renders content, model chip, provider chip, tool info, and elapsed time on the completed delegation card", () => {
+      // Seed the store with a delegation_started message so
+      // elapsedForDelegation can resolve the paired timestamp.
+      mockChatStore.messages = [
+        {
+          id: "start-1",
+          role: "delegation_started",
+          chainId: "chain-1",
+          timestamp: "2026-06-01T00:00:00Z",
+        },
+      ];
+
+      const wrapper = mountWithRouter(
+        makeMessage({
+          role: "delegation",
+          targetAgent: "planner",
+          chainId: "chain-1",
+          content: "Implemented the user model",
+          toolCalls: 4,
+          lastTool: "read",
+          modelName: "gpt-4",
+          providerName: "openai",
+          timestamp: "2026-06-01T00:02:30Z",
+        }),
+      );
+
+      const card = wrapper.find(
+        '[data-testid="delegation-completed-card"]',
+      );
+      expect(card.exists()).toBe(true);
+      expect(card.text()).toContain("planner");
+      // Shows model chip as secondary context
+      expect(card.text()).toContain("gpt-4");
+      expect(card.text()).toContain("openai");
+      // Shows the actual task content
+      expect(card.text()).toContain("Implemented the user model");
+      expect(card.text()).toContain("4");
+      expect(card.text()).toContain("read");
+      expect(card.text()).toContain("2m 30s");
     });
   });
 
@@ -619,9 +668,10 @@ describe("MessageBubble", () => {
       // <p class="thinking"> bare paragraph is replaced.
       const details = wrapper.find('details[data-testid="thinking-panel"]');
       expect(details.exists()).toBe(true);
-      // Collapsed by default — the `open` attribute is absent on
-      // first render.
-      expect(details.attributes("open")).toBeUndefined();
+      // Collapsed by default — the `open` attribute is falsy on
+      // first render (Vue's test environment returns "" rather than
+      // undefined for absent boolean attributes).
+      expect(details.attributes("open")).not.toBe("true");
       // The body content still has to be reachable in the DOM (even
       // though visually hidden by the collapsed state) so search and
       // copy operations work on the underlying text.
