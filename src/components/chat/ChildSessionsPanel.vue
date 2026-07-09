@@ -5,18 +5,14 @@ import type { SessionSummary } from '@/types'
 
 defineOptions({ name: 'ChildSessionsPanel' })
 
-// ChildSessionsPanel is the persistent sibling of DelegationStrip.
-//
-// DelegationStrip renders transient swarm-bus delegation events that vanish
-// after a page reload. ChildSessionsPanel reads the persistent session graph
-// from chatStore.sessions and surfaces every child of the current session,
+// ChildSessionsPanel reads the persistent session graph from
+// chatStore.sessions and surfaces every child of the current session,
 // so the user can navigate back into a delegated child even after a refresh.
 //
-// We intentionally coexist rather than replace DelegationStrip: the strip
-// answers "what's happening right now in my swarm?" (live pulses during a
-// long tool-loop), and this panel answers "what sessions did I delegate
-// from this thread?" (durable state). Keep both mounted; auto-hide each
-// when its data source is empty.
+// Unlike the inline delegation cards (which show transient swarm-bus
+// delegation events that vanish after a page reload), this panel answers
+// "what sessions did I delegate from this thread?" (durable state).
+// Auto-hides when there are no child sessions.
 const chatStore = useChatStore()
 
 const childSessions = computed<SessionSummary[]>(() => {
@@ -64,12 +60,12 @@ function isStreaming(child: SessionSummary): boolean {
 // click through chatStore.loadSessionForDelegation rather than
 // calling loadSessionMessages directly. This is the same seam every
 // delegated-session click surface uses (MessageBubble in-thread
-// cards, DelegationPanel swarm-bus cards) so chainId routing,
-// validated id hints, and the cold-reload backfill all apply
-// uniformly. The pre-fix direct path bypassed the resolver — the
-// six prior bug-fix commits (4607120b et al.) protected only the
-// in-thread surface, so this panel kept re-opening the bug for
-// users who navigated via the persistent child list.
+// cards, ChildSessionsPanel rows) so chainId routing, validated id
+// hints, and the cold-reload backfill all apply uniformly. The
+// pre-fix direct path bypassed the resolver — the six prior bug-fix
+// commits (4607120b et al.) protected only the in-thread surface,
+// so this panel kept re-opening the bug for users who navigated via
+// the persistent child list.
 //
 // The hint chain: chainId (when known on the persisted Session)
 // disambiguates same-agent siblings; childSessionId is the local

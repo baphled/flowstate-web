@@ -6,12 +6,11 @@ import ChildSessionsPanel from './ChildSessionsPanel.vue'
 import { useChatStore } from '@/stores/chatStore'
 import type { SessionSummary } from '@/types'
 
-// ChildSessionsPanel is the persistent sibling to DelegationStrip.
-//
-// DelegationStrip renders transient swarm-bus delegation events that vanish
-// after a page reload. ChildSessionsPanel reads the persistent session graph
-// from chatStore and surfaces every child of the current session, regardless
-// of whether the originating swarm event is still in memory.
+// ChildSessionsPanel reads the persistent session graph from chatStore
+// and surfaces every child of the current session, regardless of whether
+// the originating swarm event is still in memory. Unlike the inline
+// delegation cards (transient swarm-bus events), this panel provides
+// durable navigation to child sessions even after a page reload.
 //
 // Contracts pinned here:
 //   1. Renders zero rows when the active session has no children.
@@ -98,9 +97,9 @@ describe('ChildSessionsPanel', () => {
   // cold-reload backfill), uses the validated childSessionId hint
   // otherwise, and falls back to the agent-id heuristic. Pre-fix this
   // path called loadSessionMessages directly, bypassing the resolver
-  // entirely — both other delegated-session click surfaces share the
-  // same seam now (MessageBubble in-thread cards, DelegationPanel swarm
-  // bus events) so the fix surface for the bug class is unified.
+  // entirely — the other delegated-session click surfaces share the
+  // same seam now (MessageBubble in-thread cards) so the fix surface
+  // for the bug class is unified.
   it('navigates to the child session via chatStore.loadSessionForDelegation when a row is clicked', async () => {
     const chatStore = useChatStore()
     chatStore.sessions = [
