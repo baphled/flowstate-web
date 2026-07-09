@@ -75,9 +75,9 @@ describe("buildToolRenderSpec", () => {
     expect(buildToolRenderSpec(msg).heading).toBe("grep TODO");
   });
 
-  it("uses name as the heading for skill_load tool calls", () => {
+  it("renders skill_load with \"-> Skill: <name>\" for parsed-object input", () => {
     const msg = makeToolMessage("tool_call", "skill_load", { name: "vue" });
-    expect(buildToolRenderSpec(msg).heading).toBe("skill_load vue");
+    expect(buildToolRenderSpec(msg).heading).toBe("-> Skill: vue");
   });
 
   it("renders preferred fallback keys for tools outside the allowlist", () => {
@@ -145,19 +145,28 @@ describe("buildToolRenderSpec", () => {
     expect(buildToolRenderSpec(msg).heading).toBe("write");
   });
 
-  it("renders a persisted bare-string toolInput as the heading directly", () => {
-    // Backend accumulator persists a bare display string (not JSON) for
-    // hand-coded tools. Older sessions also persisted bare strings for
-    // unknown tools. The renderer must accept both shapes.
+  it("renders a persisted bare-string toolInput for non-skill tools as toolName + value", () => {
     const msg: Message = {
       id: "t-bare",
+      role: "tool_call",
+      content: "read",
+      timestamp: "2026-05-03T00:00:00Z",
+      toolName: "read",
+      toolInput: "/tmp/foo.ts",
+    };
+    expect(buildToolRenderSpec(msg).heading).toBe("read /tmp/foo.ts");
+  });
+
+  it("renders a persisted bare-string toolInput for skill_load as \"-> Skill: <name>\"", () => {
+    const msg: Message = {
+      id: "t-bare-skill",
       role: "tool_call",
       content: "skill_load",
       timestamp: "2026-05-03T00:00:00Z",
       toolName: "skill_load",
       toolInput: "pre-action",
     };
-    expect(buildToolRenderSpec(msg).heading).toBe("skill_load pre-action");
+    expect(buildToolRenderSpec(msg).heading).toBe("-> Skill: pre-action");
   });
 
   it("truncates long fallback values at 80 characters with an ellipsis", () => {

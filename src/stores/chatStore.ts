@@ -21,7 +21,7 @@ import {
   type TurnStatePermissionRequest,
 } from '@/api'
 import { recordStreamEvent } from '@/lib/streamLog'
-import { exhaustivenessGuard, parseSSEPayload, type SSEEvent } from '@/lib/sseEvent'
+import { exhaustivenessGuard, parseSSEPayload, type SSEDelegationEvent, type SSEEvent } from '@/lib/sseEvent'
 import { dismissToast, showToast, updateToast } from '@/composables/useToast'
 import { useTodoStore } from './todoStore'
 import { useQuotaStore } from './quotaStore'
@@ -406,6 +406,8 @@ function rowsShallowEqual(existing: Message, incoming: Partial<Message>): boolea
     'toolInput',
     'agentId',
     'timestamp',
+    'durationMs',
+    'elapsedMs',
   ]
   for (const k of keys) {
     if (k in incoming && existing[k] !== incoming[k]) {
@@ -950,6 +952,28 @@ export const useChatStore = defineStore('chat', {
     // resume granular control. Transient — never persisted (the override is
     // session-level UX, not session metadata).
     toolCardOpenOverride: 'auto' as 'auto' | 'expanded' | 'collapsed',
+    // ---- turn-metadata stamp queuing -------------------------------------
+    //
+    // Transient one-shot buffer: set by pollTurnUntilTerminal when the Turn
+    // reaches a terminal state (completed / failed), then consumed by
+    // applyTurnMetadata after reconcileFromBackend completes. reconcileFrom-
+    // Backend overwrites this.messages from the backend snapshot (which has
+    // no frontend-only modelName / providerName fields), so we must re-apply
+    // the metadata AFTER the backend merge.
+    //
+    // Set to null once consumed; reset to null on session change. The
+    // modelName / providerName mirror TurnState.model so the poll loop and
+    // the apply function stay coupled on a minimal contract.
+    //
+    // NOTE: durationMs is NOT buffered here. Turn-level duration is computed
+    // from message timestamp deltas by stampTurnDurations (the single source
+    // of truth for durationMs), which runs after every reconcileFromBackend
+    // and after every applyTurnMetadata. Only modelName / providerName need
+    // to survive the backend merge via this one-shot buffer.
+    pendingTurnMetadata: null as {
+      modelName: string
+      providerName: string
+    } | null,
   }),
 
   getters: {
@@ -1351,7 +1375,7 @@ export const useChatStore = defineStore('chat', {
       // safe — the action re-checks currentSessionId at each iteration.
       void this.pollTurnUntilTerminal(sessionId, activeTurnId).finally(() => {
         this.setSessionStreaming(sessionId, { isLoading: false, isStreaming: false })
-        void this.reconcileFromBackend(sessionId)
+        void this.reconcileFromBackend(sessionId).then(() => this.applyTurnMetadata())
       })
     },
 
@@ -2195,6 +2219,18 @@ export const useChatStore = defineStore('chat', {
 
       this.messages = [...sealedBackend, ...optimisticOrphans, ...inFlightLocalOrphans]
 
+      // Recompute per-tool elapsed times from the freshly loaded backend
+      // timestamps. The backend persists timestamps but NOT the
+      // frontend-only elapsedMs field, so a cold session load would leave
+      // tool cards without duration chips unless we recompute here.
+      this.stampToolElapsedTimes()
+
+      // Recompute turn-level durationMs from message timestamp deltas so
+      // cold session loads show response-time chips too. The backend
+      // persists timestamps but NOT durationMs, and stampTurnDurations is
+      // the single source of truth for that field.
+      this.stampTurnDurations()
+
       // Refresh the session-level model+provider from the most recent
       // assistant message. The backend's appendSessionMessage promotes
       // the engine-stamped (model, provider) onto the session whenever
@@ -2220,6 +2256,118 @@ export const useChatStore = defineStore('chat', {
         sessionId,
         messageCount: this.messages.length,
       })
+    },
+
+    /**
+     * applyTurnMetadata stamps turn-level metadata (modelName,
+     * providerName) and per-tool elapsed times onto the messages array.
+     * Must be called AFTER reconcileFromBackend because that action
+     * overwrites this.messages from the backend snapshot (which has none
+     * of the frontend-only fields).
+     *
+     * Reads pendingTurnMetadata (set by pollTurnUntilTerminal when the Turn
+     * reached a terminal state), finds the last assistant message, stamps
+     * it, then walks tool_call → tool_result pairs to compute per-tool
+     * elapsedMs from their timestamps. Clears pendingTurnMetadata when done.
+     *
+     * Duration (durationMs) is NOT stamped here — it is computed from
+     * message timestamp deltas by stampTurnDurations, which this action
+     * invokes at the end so live turns get durations alongside cold loads.
+     */
+    applyTurnMetadata(): void {
+      const meta = this.pendingTurnMetadata
+      if (!meta) return
+      this.pendingTurnMetadata = null
+
+      // 1. Stamp model/provider on the last assistant message
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        const msg = this.messages[i]
+        if (msg.role === 'assistant') {
+          this.messages[i] = {
+            ...msg,
+            modelName: meta.modelName || msg.modelName,
+            providerName: meta.providerName || msg.providerName,
+          }
+          break
+        }
+      }
+
+      // 2. Per-tool elapsed times — delegated to stampToolElapsedTimes
+      //    so the SAME computation runs after reconcileFromBackend
+      //    (cold-load path) as after a live turn.
+      this.stampToolElapsedTimes()
+
+      // 3. Turn-level durationMs — delegated to stampTurnDurations so the
+      //    SAME computation runs after reconcileFromBackend (cold-load
+      //    path) as after a live turn. stampTurnDurations is the single
+      //    source of truth for durationMs.
+      this.stampTurnDurations()
+    },
+
+    /**
+     * stampToolElapsedTimes computes per-tool elapsedMs from adjacent
+     * tool_call → tool_result timestamp deltas, pairing messages by
+     * adjacency and toolName equality (same logic as collapseToolPairs
+     * in chatViewHelpers.ts).
+     *
+     * Called after every reconcileFromBackend so the values survive cold
+     * loads — backend messages carry the timestamps needed to compute
+     * elapsed time, but the backend does not persist the frontend-only
+     * elapsedMs field. Also called by applyTurnMetadata after live turns.
+     */
+    stampToolElapsedTimes(): void {
+      for (let i = 0; i < this.messages.length - 1; i++) {
+        const current = this.messages[i]
+        const next = this.messages[i + 1]
+        if (
+          current.role === 'tool_call' &&
+          next.role === 'tool_result' &&
+          next.toolName === current.toolName
+        ) {
+          const callTime = Date.parse(current.timestamp)
+          const resultTime = Date.parse(next.timestamp)
+          if (!Number.isNaN(callTime) && !Number.isNaN(resultTime)) {
+            this.messages[i + 1] = { ...next, elapsedMs: resultTime - callTime }
+          }
+        }
+      }
+    },
+
+    /**
+     * stampTurnDurations computes the response-time duration for every
+     * assistant message by measuring the timestamp delta between the
+     * preceding user message and the assistant response. This is the
+     * actual wall-clock time the user waited for the answer.
+     *
+     * Called after every reconcileFromBackend (alongside
+     * stampToolElapsedTimes) so durations survive cold session loads —
+     * the timestamps come from the backend Message JSON and are always
+     * present. Overwrites any prior value (e.g. a backend accumulator
+     * stamp) so the display is always consistent.
+     *
+     * Skips assistant messages that have no preceding user message (the
+     * first message in a session, or an assistant message preceded only
+     * by tool/system messages).
+     */
+    stampTurnDurations(): void {
+      for (let i = 0; i < this.messages.length; i++) {
+        const msg = this.messages[i]
+        if (msg.role !== 'assistant') continue
+        // Walk backwards to find the nearest preceding user message.
+        for (let j = i - 1; j >= 0; j--) {
+          const prev = this.messages[j]
+          if (prev.role !== 'user') continue
+          const userTime = Date.parse(prev.timestamp)
+          const asstTime = Date.parse(msg.timestamp)
+          if (!Number.isNaN(userTime) && !Number.isNaN(asstTime)) {
+            const delta = asstTime - userTime
+            if (delta > 0) {
+              this.messages[i] = { ...msg, durationMs: delta }
+            }
+          }
+          break
+        }
+      }
     },
 
     /**
@@ -2826,6 +2974,34 @@ export const useChatStore = defineStore('chat', {
           }
         }
 
+        // ---- Turn metadata buffer (model/provider) ----
+        // When the turn reaches a terminal state, buffer the model +
+        // provider into pendingTurnMetadata. Model/provider are the
+        // PRIMARY attribution signal and must be buffered on EVERY
+        // terminal turn that carries model info.
+        //
+        // Duration (durationMs) is NOT buffered here — it is computed
+        // from message timestamp deltas by stampTurnDurations, which
+        // runs after reconcileFromBackend and after applyTurnMetadata.
+        //
+        // This is NOT stamped on messages here because
+        // reconcileFromBackend (called by both sendMessage and
+        // maybeReattachStream AFTER the poll loop returns) will
+        // overwrite the messages array from the backend snapshot,
+        // discarding any frontend-only fields. The metadata is instead
+        // applied by applyTurnMetadata(), which the callers invoke after
+        // reconcileFromBackend completes.
+        // Per-tool elapsed times and turn durations are also stamped at
+        // that point.
+        if (state.status === 'completed' || state.status === 'failed') {
+          if (state.model?.model || state.model?.provider) {
+            this.pendingTurnMetadata = {
+              modelName: state.model?.model ?? '',
+              providerName: state.model?.provider ?? '',
+            }
+          }
+        }
+
         if (state.status === 'failed') {
           // Surface the engine's error so the user sees what happened.
           // The post-poll reconcile still fires from sendMessage's
@@ -2872,8 +3048,7 @@ export const useChatStore = defineStore('chat', {
     // the persisted `delegation` / `delegation_started` message carries
     // only the target agent name (the streaming.DelegationEvent wire shape
     // has no ChildSessionID; the load-bearing child_session_id is on the
-    // separate SwarmEvent stream consumed by DelegationPanel, not on the
-    // per-session SSE chat stream).
+    // separate SwarmEvent stream, not on the per-session SSE chat stream).
     //
     // Resolution — load-bearing, and DELIBERATELY scoped to the active
     // session's own delegation branch:
@@ -2936,7 +3111,7 @@ export const useChatStore = defineStore('chat', {
     // loadSessionForDelegation is the seam EVERY delegated-session
     // click surface routes through — the in-thread MessageBubble
     // delegation card, the persistent ChildSessionsPanel rows, AND
-    // the live swarm-bus DelegationPanel cards. Sharing one resolver
+    // the swarm-bus delegation events. Sharing one resolver
     // closes the bug class where each surface re-implemented routing
     // and bypassed the chainId disambiguation (prior six fixes —
     // 4607120b/b1d485eb/93bf40ed/a488b858/40ad53d2/21f0681e — each
@@ -2958,9 +3133,9 @@ export const useChatStore = defineStore('chat', {
     //      reached the chunk processor). Bounded to one refresh so a
     //      genuinely-unknown chainId can't induce a polling loop.
     //   3. If childSessionId is set AND it appears in sessions[],
-    //      use it directly. This is the DelegationPanel/
-    //      ChildSessionsPanel hint path — they read the id off a
-    //      SwarmEvent or SessionSummary, and we validate it against
+    //      use it directly. This is the ChildSessionsPanel
+    //      hint path — it reads the id off a SwarmEvent or
+    //      SessionSummary, and we validate it against
     //      our local list before trusting it. An unvalidated hint is
     //      discarded (a stale or spoofed id should not silently
     //      navigate us to a session we have no record of).
@@ -3015,8 +3190,8 @@ export const useChatStore = defineStore('chat', {
         }
       }
       // Step 4 — agent-id fallback. Requires agentId; without it (a
-      // DelegationPanel event whose metadata has neither a known
-      // chainId nor a present childSessionId AND no target_agent —
+      // SwarmEvent whose metadata has neither a known chainId
+      // nor a present childSessionId AND no target_agent —
       // a degenerate payload) we return false rather than guess.
       if (!agentId) {
         return false
@@ -3293,6 +3468,7 @@ export const useChatStore = defineStore('chat', {
         // been renamed to the canonical id, so the merge's orphan-
         // preservation rule produces zero duplicates.
         await this.reconcileFromBackend(capturedSessionId)
+        this.applyTurnMetadata()
 
         await this.loadSessions()
       } catch (error) {
@@ -3464,20 +3640,7 @@ export const useChatStore = defineStore('chat', {
       this.setSessionStreaming(sessionId ?? this.currentSessionId, { isLoading: false, isStreaming: false })
     },
 
-    applyDelegationEvent(payload: string): void {
-      let info: {
-        chain_id?: string
-        target_agent?: string
-        tool_calls?: number
-        last_tool?: string
-        status?: string
-      }
-      try {
-        info = JSON.parse(payload)
-      } catch {
-        return
-      }
-
+    applyDelegationEvent(event: SSEDelegationEvent): void {
       // Prefer matching by chain_id or target_agent — those identify a
       // specific in-flight delegation. Fall back to the in-flight
       // streaming assistant (status === 'running'), NOT any non-completed
@@ -3488,14 +3651,14 @@ export const useChatStore = defineStore('chat', {
         this.messages.find(
           (message) =>
             message.status !== 'completed' &&
-            info.chain_id !== undefined &&
-            message.chainId === info.chain_id,
+            event.chainId !== undefined &&
+            message.chainId === event.chainId,
         ) ??
         this.messages.find(
           (message) =>
             message.status !== 'completed' &&
-            info.target_agent !== undefined &&
-            message.targetAgent === info.target_agent,
+            event.targetAgent !== undefined &&
+            message.targetAgent === event.targetAgent,
         ) ??
         this.messages.find((message) => message.status === 'running' && message.role === 'assistant')
 
@@ -3509,27 +3672,36 @@ export const useChatStore = defineStore('chat', {
           content: '',
           timestamp: new Date().toISOString(),
           status: 'running',
-          targetAgent: info.target_agent,
-          chainId: info.chain_id,
+          targetAgent: event.targetAgent,
+          chainId: event.chainId,
         }
         this.messages.push(newDelegation)
         target = newDelegation
       }
 
-      if (info.target_agent !== undefined) {
-        target.targetAgent = info.target_agent
+      if (event.targetAgent !== undefined) {
+        target.targetAgent = event.targetAgent
       }
-      if (info.chain_id !== undefined) {
-        target.chainId = info.chain_id
+      if (event.chainId !== undefined) {
+        target.chainId = event.chainId
       }
-      if (info.tool_calls !== undefined) {
-        target.toolCalls = info.tool_calls
+      if (event.toolCalls !== undefined) {
+        target.toolCalls = event.toolCalls
       }
-      if (info.last_tool !== undefined) {
-        target.lastTool = info.last_tool
+      if (event.lastTool !== undefined) {
+        target.lastTool = event.lastTool
       }
-      if (info.status !== undefined) {
-        target.status = info.status
+      if (event.status !== undefined) {
+        target.status = event.status
+      }
+      if (event.description !== undefined) {
+        target.description = event.description
+      }
+      if (event.modelName !== undefined) {
+        target.modelName = event.modelName
+      }
+      if (event.providerName !== undefined) {
+        target.providerName = event.providerName
       }
     },
 
@@ -3588,7 +3760,11 @@ export const useChatStore = defineStore('chat', {
           this.handleToolCallEvent({ name: event.name, status: event.status, input: event.input })
           return
         case 'skill_load':
-          this.handleToolCallEvent({ name: event.name, status: 'running' })
+          this.handleToolCallEvent({
+            name: 'skill_load',
+            status: 'running',
+            input: JSON.stringify({ name: event.name }),
+          })
           return
         case 'tool_result':
           this.handleToolResultEvent({ content: event.content })
@@ -3597,7 +3773,7 @@ export const useChatStore = defineStore('chat', {
           this.handleToolErrorEvent({ content: event.content })
           return
         case 'delegation':
-          this.applyDelegationEvent(event.raw)
+          this.applyDelegationEvent(event)
           return
         case 'error':
           this.error = event.error
@@ -4507,6 +4683,10 @@ export const useChatStore = defineStore('chat', {
       const content = String(info.content ?? '')
 
       if (target) {
+        // Per-tool elapsedMs is now stamped by stampToolElapsedTimes
+        // after reconcile, which computes the delta from backend
+        // timestamps for accuracy — the wall-clock estimate previously
+        // computed here could diverge from the canonical value.
         target.content = content
         target.status = 'completed'
       }

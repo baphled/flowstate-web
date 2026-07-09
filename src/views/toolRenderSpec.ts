@@ -158,6 +158,21 @@ function resolveHeading(
 }
 
 /**
+ * Formats the heading for a skill_load message. Handles both parsed-object
+ * input ({"name":"<skill>"}) and bare-string persisted input ("<skill>").
+ */
+function skillLoadHeading(parsed: Record<string, unknown> | string | null): string {
+  let skillName = "";
+  if (parsed && typeof parsed === "object") {
+    const v = (parsed as Record<string, unknown>).name;
+    skillName = typeof v === "string" ? v : "";
+  } else if (typeof parsed === "string") {
+    skillName = parsed;
+  }
+  return `-> Skill: ${skillName}`;
+}
+
+/**
  * Build the canonical render spec for a tool message, mirroring the tiered
  * fallback in internal/tool/display/display.go. Returns empty fields for
  * non-tool messages so callers can render a uniform shape.
@@ -171,6 +186,13 @@ export function buildToolRenderSpec(message: Message): ToolRenderSpec {
   const parsed = parseToolInput(message.toolInput);
   const heading = resolveHeading(toolName, parsed);
   const body = message.role === "tool_result" ? (message.content ?? "") : "";
+
+  // Special-case skill_load: render as "-> Skill: <name>" for both
+  // parsed-object and bare-string persisted input. Keep non-skill tools
+  // unchanged.
+  if (toolName === "skill_load") {
+    return { toolName, heading: skillLoadHeading(parsed), body };
+  }
 
   return { toolName, heading, body };
 }

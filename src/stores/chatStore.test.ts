@@ -699,14 +699,15 @@ describe('chatStore - sendMessage', () => {
     expect(store.messages[0].content).toBe('ok')
   })
 
-  it('creates a running tool_result message for skill_load events', () => {
+  it('creates a running tool_result message for skill_load events with toolName skill_load and JSON input', () => {
     const store = useChatStore()
 
     store.applyContentEvent(JSON.stringify({ type: 'skill_load', name: 'bdd-workflow' }))
 
     expect(store.messages).toHaveLength(1)
     expect(store.messages[0].role).toBe('tool_result')
-    expect(store.messages[0].toolName).toBe('bdd-workflow')
+    expect(store.messages[0].toolName).toBe('skill_load')
+    expect(store.messages[0].toolInput).toBe('{"name":"bdd-workflow"}')
     expect(store.messages[0].status).toBe('running')
   })
 
@@ -4351,6 +4352,27 @@ describe('chatStore - optimistic user message reconciliation (C-1, C-2)', () => 
     expect(userMsg).toBeDefined()
     expect(userMsg?.status).not.toBe('failed')
   })
+
+  it('stamps tool elapsedMs after cold-load reconcile', async () => {
+    // The persistence fix: on cold session load (reconcileFromBackend
+    // without a preceding poll), tool cards should show elapsed time
+    // computed from the backend-carried timestamps. Before the fix the
+    // stamping loop lived inside applyTurnMetadata (gated behind
+    // pendingTurnMetadata) and never ran on cold load.
+    const store = useChatStore()
+    store.currentSessionId = 'session-1'
+    store.messages = []
+
+    vi.mocked(fetchSessionMessages).mockResolvedValueOnce([
+      { id: 'srv-tc1', role: 'tool_call', content: '', timestamp: '2026-07-02T00:00:00Z', toolName: 'read' },
+      { id: 'srv-tr1', role: 'tool_result', content: 'data', timestamp: '2026-07-02T00:00:03Z', toolName: 'read' },
+    ])
+
+    await store.reconcileFromBackend('session-1')
+
+    const toolResult = store.messages.find((m) => m.id === 'srv-tr1')
+    expect(toolResult?.elapsedMs).toBe(3000)
+  })
 })
 
 describe('chatStore - loadSessionMessages clears isStreaming alongside isLoading (C-7)', () => {
@@ -4418,7 +4440,7 @@ describe('chatStore - applyDelegationEvent', () => {
     ]
 
     store.applyDelegationEvent(
-      JSON.stringify({ target_agent: 'executor', chain_id: 'chain-1', status: 'started' }),
+      { kind: 'delegation', raw: '', targetAgent: 'executor', chainId: 'chain-1', status: 'started' },
     )
 
     const delegation = store.messages.find((m) => m.role === 'delegation_started')
@@ -4443,13 +4465,518 @@ describe('chatStore - applyDelegationEvent', () => {
     ]
 
     store.applyDelegationEvent(
-      JSON.stringify({ chain_id: 'chain-1', tool_calls: 3, last_tool: 'bash' }),
+      { kind: 'delegation', raw: '', chainId: 'chain-1', toolCalls: 3, lastTool: 'bash' },
     )
 
     const delegations = store.messages.filter((m) => m.role === 'delegation_started')
     expect(delegations).toHaveLength(1)
     expect(delegations[0].toolCalls).toBe(3)
     expect(delegations[0].lastTool).toBe('bash')
+  })
+
+  it('extracts description from the payload onto the target message', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'plan something', timestamp: '2026-05-04T00:00:00Z' },
+    ]
+
+    store.applyDelegationEvent(
+      {
+        kind: 'delegation',
+        raw: '',
+        targetAgent: 'executor',
+        chainId: 'chain-1',
+        status: 'started',
+        description: 'Implement the user model',
+      },
+    )
+
+    const delegation = store.messages.find((m) => m.role === 'delegation_started')
+    expect(delegation?.description).toBe('Implement the user model')
+  })
+
+  it('extracts model_name onto target.modelName', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'plan something', timestamp: '2026-05-04T00:00:00Z' },
+    ]
+
+    store.applyDelegationEvent(
+      {
+        kind: 'delegation',
+        raw: '',
+        targetAgent: 'executor',
+        chainId: 'chain-1',
+        modelName: 'gpt-4',
+      },
+    )
+
+    const delegation = store.messages.find((m) => m.role === 'delegation_started')
+    expect(delegation?.modelName).toBe('gpt-4')
+  })
+
+  it('extracts provider_name onto target.providerName', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'plan something', timestamp: '2026-05-04T00:00:00Z' },
+    ]
+
+    store.applyDelegationEvent(
+      {
+        kind: 'delegation',
+        raw: '',
+        targetAgent: 'executor',
+        chainId: 'chain-1',
+        providerName: 'openai',
+      },
+    )
+
+    const delegation = store.messages.find((m) => m.role === 'delegation_started')
+    expect(delegation?.providerName).toBe('openai')
+  })
+})
+
+// ── stampToolElapsedTimes — per-tool elapsedMs from timestamp deltas ──
+
+describe('chatStore - stampToolElapsedTimes', () => {
+  beforeEach(() => {
+    installLocalStorageStub()
+    vi.clearAllMocks()
+    setActivePinia(createPinia())
+  })
+
+  it('stamps elapsedMs on tool_result paired with preceding tool_call by toolName + adjacency', () => {
+    const store = useChatStore()
+    const T0 = '2026-07-02T00:00:00Z'
+    const T0_plus_2s = '2026-07-02T00:00:02Z'
+    store.messages = [
+      { id: 'tc1', role: 'tool_call', content: '', timestamp: T0, toolName: 'read' },
+      { id: 'tr1', role: 'tool_result', content: 'result', timestamp: T0_plus_2s, toolName: 'read' },
+    ]
+
+    store.stampToolElapsedTimes()
+
+    expect(store.messages[1].elapsedMs).toBe(2000)
+  })
+
+  it('skips when tool names differ', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'tc1', role: 'tool_call', content: '', timestamp: '2026-07-02T00:00:00Z', toolName: 'read' },
+      { id: 'tr1', role: 'tool_result', content: '', timestamp: '2026-07-02T00:00:05Z', toolName: 'write' },
+    ]
+
+    store.stampToolElapsedTimes()
+
+    expect(store.messages[0].elapsedMs).toBeUndefined()
+    expect(store.messages[1].elapsedMs).toBeUndefined()
+  })
+
+  it('skips when not adjacent', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'tc1', role: 'tool_call', content: '', timestamp: '2026-07-02T00:00:00Z', toolName: 'read' },
+      { id: 'a1', role: 'assistant', content: 'thinking', timestamp: '2026-07-02T00:00:01Z' },
+      { id: 'tr1', role: 'tool_result', content: '', timestamp: '2026-07-02T00:00:02Z', toolName: 'read' },
+    ]
+
+    store.stampToolElapsedTimes()
+
+    // The pair is not adjacent (assistant sits between) — no stamping.
+    expect(store.messages[0].elapsedMs).toBeUndefined()
+    expect(store.messages[2].elapsedMs).toBeUndefined()
+  })
+
+  it('skips when timestamps are invalid', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'tc1', role: 'tool_call', content: '', timestamp: 'bad', toolName: 'read' },
+      { id: 'tr1', role: 'tool_result', content: '', timestamp: 'alsobad', toolName: 'read' },
+    ]
+
+    store.stampToolElapsedTimes()
+
+    expect(store.messages[1].elapsedMs).toBeUndefined()
+  })
+
+  it('overwrites existing elapsedMs with fresh computation', () => {
+    const store = useChatStore()
+    // Seed a tool_result that already carries a stale elapsedMs=999.
+    // stampToolElapsedTimes should recompute from the timestamp delta
+    // (2 seconds), NOT preserve the old value.
+    store.messages = [
+      { id: 'tc1', role: 'tool_call', content: '', timestamp: '2026-07-02T00:00:00Z', toolName: 'read' },
+      { id: 'tr1', role: 'tool_result', content: '', timestamp: '2026-07-02T00:00:02Z', toolName: 'read', elapsedMs: 999 },
+    ]
+
+    store.stampToolElapsedTimes()
+
+    expect(store.messages[1].elapsedMs).toBe(2000)
+  })
+})
+
+// ── stampTurnDurations — per-turn durationMs from message timestamp deltas ──
+
+describe('chatStore - stampTurnDurations', () => {
+  beforeEach(() => {
+    installLocalStorageStub()
+    vi.clearAllMocks()
+    setActivePinia(createPinia())
+  })
+
+  it('stamps durationMs as the delta between preceding user message and assistant message timestamps', () => {
+    const store = useChatStore()
+    const T0 = '2026-07-02T00:00:00Z'
+    const T0_plus_3s = '2026-07-02T00:00:03Z'
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'hello', timestamp: T0 },
+      { id: 'a1', role: 'assistant', content: 'hi back', timestamp: T0_plus_3s },
+    ]
+
+    store.stampTurnDurations()
+
+    expect(store.messages[1].durationMs).toBe(3000)
+  })
+
+  it('skips assistant messages with no preceding user message', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'a1', role: 'assistant', content: 'first', timestamp: '2026-07-02T00:00:00Z' },
+    ]
+
+    store.stampTurnDurations()
+
+    expect(store.messages[0].durationMs).toBeUndefined()
+  })
+
+  it('uses the NEAREST preceding user message (not the first)', () => {
+    const store = useChatStore()
+    const T0 = '2026-07-02T00:00:00Z'
+    const T1 = '2026-07-02T00:00:01Z'
+    const T5 = '2026-07-02T00:00:05Z'
+    const T8 = '2026-07-02T00:00:08Z'
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'first question', timestamp: T0 },
+      { id: 'a1', role: 'assistant', content: 'first answer', timestamp: T1 },
+      { id: 'u2', role: 'user', content: 'second question', timestamp: T5 },
+      { id: 'a2', role: 'assistant', content: 'second answer', timestamp: T8 },
+    ]
+
+    store.stampTurnDurations()
+
+    // a1 pairs with u1 (delta = 1s), a2 pairs with u2 (delta = 3s) — the
+    // nearest preceding user message, NOT the very first one.
+    expect(store.messages[1].durationMs).toBe(1000)
+    expect(store.messages[3].durationMs).toBe(3000)
+  })
+
+  it('skips when timestamps are invalid', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'bad', timestamp: 'bad' },
+      { id: 'a1', role: 'assistant', content: 'alsobad', timestamp: 'alsobad' },
+    ]
+
+    store.stampTurnDurations()
+
+    expect(store.messages[1].durationMs).toBeUndefined()
+  })
+
+  it('overwrites existing durationMs with fresh computation', () => {
+    const store = useChatStore()
+    // Seed an assistant message that already carries a stale durationMs=999.
+    // stampTurnDurations should recompute from the timestamp delta
+    // (3 seconds), NOT preserve the old value.
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'hi', timestamp: '2026-07-02T00:00:00Z' },
+      { id: 'a1', role: 'assistant', content: 'hello', timestamp: '2026-07-02T00:00:03Z', durationMs: 999 },
+    ]
+
+    store.stampTurnDurations()
+
+    expect(store.messages[1].durationMs).toBe(3000)
+  })
+})
+
+describe('chatStore - applyTurnMetadata', () => {
+  beforeEach(() => {
+    installLocalStorageStub()
+    vi.clearAllMocks()
+    setActivePinia(createPinia())
+  })
+
+  it('is a no-op when pendingTurnMetadata is null', () => {
+    const store = useChatStore()
+    store.pendingTurnMetadata = null
+    store.messages = [
+      { id: 'a1', role: 'assistant', content: 'hello', timestamp: '2026-07-02T00:00:00Z' },
+    ]
+    // Snapshot the message objects so we can assert nothing was mutated.
+    const before = store.messages.map((m) => ({ ...m }))
+
+    store.applyTurnMetadata()
+
+    expect(store.messages).toEqual(before)
+  })
+
+  it('stamps modelName and providerName on the last assistant message', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'hi', timestamp: '2026-07-02T00:00:00Z' },
+      { id: 'a1', role: 'assistant', content: 'hello', timestamp: '2026-07-02T00:00:01Z' },
+    ]
+    store.pendingTurnMetadata = {
+      modelName: 'gpt-4',
+      providerName: 'openai',
+    }
+
+    store.applyTurnMetadata()
+
+    const assistant = store.messages[1]
+    expect(assistant.modelName).toBe('gpt-4')
+    expect(assistant.providerName).toBe('openai')
+  })
+
+  it('only stamps the LAST assistant message when multiple exist', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'a-old', role: 'assistant', content: 'old reply', timestamp: '2026-07-02T00:00:00Z' },
+      { id: 'u1', role: 'user', content: 'again', timestamp: '2026-07-02T00:00:01Z' },
+      { id: 'a-new', role: 'assistant', content: 'new reply', timestamp: '2026-07-02T00:00:02Z' },
+    ]
+    store.pendingTurnMetadata = {
+      modelName: 'claude-3',
+      providerName: 'anthropic',
+    }
+
+    store.applyTurnMetadata()
+
+    // The older assistant must be untouched — stamping targets only the
+    // most recent assistant row (the one the just-finished turn produced).
+    expect(store.messages[0].modelName).toBeUndefined()
+    expect(store.messages[2].modelName).toBe('claude-3')
+  })
+
+  it('preserves existing modelName on the message when meta.modelName is empty string', () => {
+    const store = useChatStore()
+    store.messages = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'hello',
+        timestamp: '2026-07-02T00:00:00Z',
+        modelName: 'existing-model',
+      },
+    ]
+    // meta.modelName is '' (falsy) — the `||` fallback must keep the
+    // message's existing modelName rather than blanking it out.
+    store.pendingTurnMetadata = {
+      modelName: '',
+      providerName: 'openai',
+    }
+
+    store.applyTurnMetadata()
+
+    expect(store.messages[0].modelName).toBe('existing-model')
+  })
+
+  it('clears pendingTurnMetadata after stamping', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'a1', role: 'assistant', content: 'hello', timestamp: '2026-07-02T00:00:00Z' },
+    ]
+    store.pendingTurnMetadata = {
+      modelName: 'gpt-4',
+      providerName: 'openai',
+    }
+
+    store.applyTurnMetadata()
+
+    // One-shot buffer — consumed and cleared so it cannot leak onto a
+    // later turn's messages.
+    expect(store.pendingTurnMetadata).toBeNull()
+  })
+
+  it('stamps elapsedMs on a tool_result paired with its preceding tool_call by toolName + adjacency', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'tc1', role: 'tool_call', toolName: 'read', content: '', timestamp: '2026-07-02T00:00:00.000Z' },
+      { id: 'tr1', role: 'tool_result', toolName: 'read', content: 'data', timestamp: '2026-07-02T00:00:02.000Z' },
+    ]
+    // pendingTurnMetadata must be non-null so applyTurnMetadata does not
+    // early-return before the elapsed-pairing loop (which lives past the
+    // null guard) runs.
+    store.pendingTurnMetadata = {
+      modelName: 'gpt-4',
+      providerName: 'openai',
+    }
+
+    store.applyTurnMetadata()
+
+    expect(store.messages[1].elapsedMs).toBe(2000)
+  })
+
+  it('skips elapsedMs when tool_call and tool_result timestamps are invalid', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'tc1', role: 'tool_call', toolName: 'read', content: '', timestamp: 'not-a-date' },
+      { id: 'tr1', role: 'tool_result', toolName: 'read', content: 'data', timestamp: 'also-bad' },
+    ]
+    store.pendingTurnMetadata = {
+      modelName: 'gpt-4',
+      providerName: 'openai',
+    }
+
+    store.applyTurnMetadata()
+
+    expect(store.messages[1].elapsedMs).toBeUndefined()
+  })
+})
+
+// ── pollTurnUntilTerminal metadata buffering (gating on model, not duration) ──
+
+describe('chatStore - pollTurnUntilTerminal metadata buffering', () => {
+  beforeEach(() => {
+    installLocalStorageStub()
+    vi.clearAllMocks()
+    setActivePinia(createPinia())
+  })
+
+  it('buffers model + provider into pendingTurnMetadata even when duration_ms is 0 (sub-ms turn)', async () => {
+    const store = useChatStore()
+    store.currentSessionId = 'session-md0'
+    store.messages = []
+
+    const ft = vi.mocked(fetchTurn)
+    ft.mockReset()
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-md0',
+      session_id: 'session-md0',
+      status: 'completed',
+      started_at: '2026-07-02T00:00:00.000Z',
+      completed_at: '2026-07-02T00:00:00.000Z',
+      duration_ms: 0,
+      model: { provider: 'openai', model: 'gpt-4' },
+      error: '',
+      messages: [],
+    } as never)
+
+    await store.pollTurnUntilTerminal('session-md0', 'turn-md0')
+
+    // The turn completed in ~0ms. Model/provider are the primary
+    // attribution signal and MUST stamp regardless of duration.
+    expect(store.pendingTurnMetadata).not.toBeNull()
+    expect(store.pendingTurnMetadata?.modelName).toBe('gpt-4')
+    expect(store.pendingTurnMetadata?.providerName).toBe('openai')
+  })
+
+  it('buffers metadata when duration_ms is absent (null) but model is present', async () => {
+    const store = useChatStore()
+    store.currentSessionId = 'session-mdnull'
+    store.messages = []
+
+    const ft = vi.mocked(fetchTurn)
+    ft.mockReset()
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-mdnull',
+      session_id: 'session-mdnull',
+      status: 'completed',
+      started_at: '',
+      completed_at: '',
+      // duration_ms omitted entirely — pre-measurement backend.
+      model: { provider: 'anthropic', model: 'claude-3' },
+      error: '',
+      messages: [],
+    } as never)
+
+    await store.pollTurnUntilTerminal('session-mdnull', 'turn-mdnull')
+
+    expect(store.pendingTurnMetadata).not.toBeNull()
+    expect(store.pendingTurnMetadata?.modelName).toBe('claude-3')
+    expect(store.pendingTurnMetadata?.providerName).toBe('anthropic')
+  })
+
+  it('buffers only model + provider (no durationMs) when duration_ms is positive', async () => {
+    const store = useChatStore()
+    store.currentSessionId = 'session-dur'
+    store.messages = []
+
+    const ft = vi.mocked(fetchTurn)
+    ft.mockReset()
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-dur',
+      session_id: 'session-dur',
+      status: 'completed',
+      started_at: '',
+      completed_at: '',
+      duration_ms: 4200,
+      model: { provider: 'zai', model: 'glm-4.6' },
+      error: '',
+      messages: [],
+    } as never)
+
+    await store.pollTurnUntilTerminal('session-dur', 'turn-dur')
+
+    // durationMs is no longer buffered — stampTurnDurations computes it
+    // from message timestamp deltas instead. pendingTurnMetadata carries
+    // only modelName and providerName.
+    expect(store.pendingTurnMetadata?.modelName).toBe('glm-4.6')
+    expect(store.pendingTurnMetadata?.providerName).toBe('zai')
+    expect(
+      (store.pendingTurnMetadata as Record<string, unknown> | null)?.durationMs,
+    ).toBeUndefined()
+  })
+
+  it('does NOT buffer pendingTurnMetadata when no model info is present (no attribution signal)', async () => {
+    const store = useChatStore()
+    store.currentSessionId = 'session-nomodel'
+    store.messages = []
+
+    const ft = vi.mocked(fetchTurn)
+    ft.mockReset()
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-nomodel',
+      session_id: 'session-nomodel',
+      status: 'completed',
+      started_at: '',
+      completed_at: '',
+      duration_ms: 5000,
+      // Empty model — nothing to attribute, so nothing to buffer.
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [],
+    } as never)
+
+    await store.pollTurnUntilTerminal('session-nomodel', 'turn-nomodel')
+
+    expect(store.pendingTurnMetadata).toBeNull()
+  })
+
+  it('buffers metadata on a failed turn that carries model info', async () => {
+    const store = useChatStore()
+    store.currentSessionId = 'session-failmd'
+    store.messages = []
+
+    const ft = vi.mocked(fetchTurn)
+    ft.mockReset()
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-failmd',
+      session_id: 'session-failmd',
+      status: 'failed',
+      started_at: '',
+      completed_at: '',
+      duration_ms: 0,
+      model: { provider: 'openai', model: 'gpt-4' },
+      error: 'rate limit exceeded',
+      messages: [],
+    } as never)
+
+    await store.pollTurnUntilTerminal('session-failmd', 'turn-failmd')
+
+    // Buffering runs before the failed-status early-return, so a failed
+    // turn still carries attribution metadata onto its assistant row.
+    expect(store.pendingTurnMetadata).not.toBeNull()
+    expect(store.pendingTurnMetadata?.modelName).toBe('gpt-4')
   })
 })
 
@@ -5202,11 +5729,15 @@ describe('chatStore - applyContentEvent dispatch', () => {
     expect(target?.content).toBe('')
   })
 
-  it('routes a type:skill_load payload to handleToolCallEvent with status running', () => {
+  it('routes a type:skill_load payload to handleToolCallEvent with name skill_load and JSON input', () => {
     const store = useChatStore()
     const spy = vi.spyOn(store, 'handleToolCallEvent')
     store.applyContentEvent(JSON.stringify({ type: 'skill_load', name: 'pre-action' }))
-    expect(spy).toHaveBeenCalledWith({ name: 'pre-action', status: 'running' })
+    expect(spy).toHaveBeenCalledWith({
+      name: 'skill_load',
+      status: 'running',
+      input: '{"name":"pre-action"}',
+    })
   })
 
   it('routes an untyped content chunk to handleContentChunk', () => {
@@ -6510,7 +7041,7 @@ describe("chatStore - loadSessionForDelegation (chainId-aware sibling disambigua
     expect(store.currentSessionId).toBe('child-for-fallback')
   })
 
-  // childSessionId hint path — DelegationPanel reads
+  // childSessionId hint path — inline delegation cards read
   // metadata.child_session_id off the live SwarmEvent and (pre-fix)
   // calls loadSessionMessages directly with NO validation against
   // sessions[]. A stale or spoofed child_session_id silently landed the
@@ -6562,9 +7093,9 @@ describe("chatStore - loadSessionForDelegation (chainId-aware sibling disambigua
   })
 
   it('ignores an unvalidated childSessionId hint and falls through to chainId / agent-id resolvers', async () => {
-    // DelegationPanel's SwarmEvent may carry a stale child_session_id
-    // (e.g. backend race where the event arrives before the session is
-    // listed, or a malformed payload). Trusting it directly opens a
+    // A SwarmEvent may carry a stale child_session_id (e.g. backend
+    // race where the event arrives before the session is listed, or
+    // a malformed payload). Trusting it directly opens a
     // wrong-session bug; the resolver must validate against sessions[]
     // and ignore unknowns rather than calling loadSessionMessages on a
     // session id we have no record of.
@@ -6612,8 +7143,8 @@ describe("chatStore - loadSessionForDelegation (chainId-aware sibling disambigua
     expect(store.currentSessionId).toBe('real-child')
   })
 
-  it('resolves when only a childSessionId hint is provided (DelegationPanel without chainId fallback)', async () => {
-    // DelegationPanel calls with chainId === event.id always, but for
+it('resolves when only a childSessionId hint is provided (swarm event without chainId fallback)', async () => {
+// Inline delegation cards always call with chainId === event.id, but for
     // robustness the resolver must still land correctly when only a
     // validated childSessionId is given.
     vi.mocked(fetchSessions).mockResolvedValueOnce([
