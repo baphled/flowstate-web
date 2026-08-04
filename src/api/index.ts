@@ -581,6 +581,8 @@ export interface TurnStateProviderQuotaSnapshot {
   rate_limit?: TurnStateProviderQuotaRateLimit | null;
   token_spend?: TurnStateProviderQuotaTokenSpend | null;
   not_configured?: TurnStateProviderQuotaNotConfig | null;
+  rate_limited_until?: string;
+  status?: string;
 }
 
 export interface TurnStateProviderQuotaRateLimit {

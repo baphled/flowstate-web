@@ -516,6 +516,7 @@ export type SSEEvent =
   | SSEContextUsageEvent
   | SSEContextCompactedEvent
   | SSEProviderQuotaEvent
+  | SSEProviderStatusChangedEvent
   | SSEGateFailedEvent
   | SSEStreamingHeartbeatEvent
   | SSEUnknownEvent
@@ -547,6 +548,15 @@ export interface SSEProviderQuotaEvent {
   rateLimit: SSEProviderQuotaRateLimit | null;
   tokenSpend: SSEProviderQuotaTokenSpend | null;
   notConfigured: SSEProviderQuotaNotConfig | null;
+
+  // RateLimitedUntil is the failover cooldown expiry (RFC 3339).
+  // Empty string when the provider/model is not currently rate-limited.
+  // ADR 001.
+  rateLimitedUntil: string;
+
+  // Status is a synthesised health indicator: "rate_limited",
+  // "exhausted", "spent", or "healthy". ADR 002.
+  status: string;
 }
 
 export interface SSEProviderQuotaRateLimit {
@@ -579,6 +589,24 @@ export interface SSEProviderQuotaTokenSpend {
 
 export interface SSEProviderQuotaNotConfig {
   reason: string;
+}
+
+/**
+ * SSEProviderStatusChangedEvent is emitted by the provider status SSE
+ * stream (GET /api/v1/providers/status/stream) on every status
+ * transition. Consumed by the quota chip to show rate-limit blink,
+ * exhaustion, or spend-at-cap states.
+ *
+ * ADR 002 — Provider Status SSE Side-Channel (July 2026).
+ */
+export interface SSEProviderStatusChangedEvent {
+  kind: "provider.status_changed";
+  provider: string;
+  model: string;
+  previousStatus: string;
+  status: string;
+  rateLimitedUntil: string;
+  observedAt: string;
 }
 
 /**
@@ -794,6 +822,30 @@ export function parseSSEPayload(payload: string): SSEEvent {
     return parseProviderQuotaEvent(obj);
   }
 
+  if (type === "provider.status_changed") {
+    return {
+      kind: "provider.status_changed",
+      provider:
+        typeof obj["provider"] === "string" ? (obj["provider"] as string) : "",
+      model:
+        typeof obj["model"] === "string" ? (obj["model"] as string) : "",
+      previousStatus:
+        typeof obj["previous_status"] === "string"
+          ? (obj["previous_status"] as string)
+          : "",
+      status:
+        typeof obj["status"] === "string" ? (obj["status"] as string) : "",
+      rateLimitedUntil:
+        typeof obj["rate_limited_until"] === "string"
+          ? (obj["rate_limited_until"] as string)
+          : "",
+      observedAt:
+        typeof obj["observed_at"] === "string"
+          ? (obj["observed_at"] as string)
+          : "",
+    };
+  }
+
   if (type === "streaming.heartbeat" || type === "streaming_heartbeat") {
     // Streaming Coherence Slice F (May 2026) — engine liveness tick.
     // Tolerate both wire formats: the canonical dotted variant per the
@@ -997,6 +1049,12 @@ function parseProviderQuotaEvent(
     rateLimit,
     tokenSpend,
     notConfigured,
+    rateLimitedUntil:
+      typeof obj["rate_limited_until"] === "string"
+        ? (obj["rate_limited_until"] as string)
+        : "",
+    status:
+      typeof obj["status"] === "string" ? (obj["status"] as string) : "",
   };
 }
 

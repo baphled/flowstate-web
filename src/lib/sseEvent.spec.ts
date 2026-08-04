@@ -618,4 +618,29 @@ describe("parseSSEPayload", () => {
       }
     });
   });
+
+  describe("provider.status_changed", () => {
+    it("parses a provider.status_changed event", () => {
+      const ev = parseSSEPayload(
+        JSON.stringify({
+          type: "provider.status_changed",
+          provider: "anthropic",
+          model: "claude-sonnet-4-20250514",
+          previous_status: "healthy",
+          status: "rate_limited",
+          rate_limited_until: "2026-07-11T15:00:00Z",
+          observed_at: "2026-07-11T14:00:00Z",
+        }),
+      );
+      expect(ev.kind).toBe("provider.status_changed");
+      if (ev.kind === "provider.status_changed") {
+        expect(ev.provider).toBe("anthropic");
+        expect(ev.model).toBe("claude-sonnet-4-20250514");
+        expect(ev.previousStatus).toBe("healthy");
+        expect(ev.status).toBe("rate_limited");
+        expect(ev.rateLimitedUntil).toBe("2026-07-11T15:00:00Z");
+        expect(ev.observedAt).toBe("2026-07-11T14:00:00Z");
+      }
+    });
+  });
 });
