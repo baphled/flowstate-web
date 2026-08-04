@@ -296,4 +296,111 @@ test.describe("Chat view", () => {
       page.getByTestId("session-switcher").getByRole("button"),
     ).toContainText(/Sprint Retro/);
   });
+
+  test("shows queued prompts inline in the chat thread and lets the user cancel them", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/sessions", async (route) => {
+      if (route.request().method() === "POST") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ id: "session-12345678" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          {
+            id: "session-12345678",
+            title: "Planning Sync",
+            agentId: "planner",
+            messageCount: 1,
+            createdAt: "2026-04-30T09:00:00Z",
+            updatedAt: "2026-05-01T09:00:00Z",
+            isStreaming: true,
+            activeTurnId: "turn-1",
+          },
+        ]),
+      });
+    });
+
+    // Cancel seam — the inline queued-bubble cancel control issues
+    // DELETE /sessions/{id}/queue/{prompt_id} via the store.
+    await page.route("**/api/v1/sessions/**/queue/*", async (route) => {
+      if (route.request().method() === "DELETE") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ status: "cancelled" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.route("**/api/v1/sessions/**/messages", async (route) => {
+      const sessionId = getSessionId(route.request().url());
+
+      if (route.request().method() === "POST") {
+        const body = route.request().postDataJSON() as { content?: string };
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            status: "queued",
+            session_id: sessionId,
+            promptId: "prompt-queued-1",
+            queuePosition: 1,
+            content: body.content ?? "",
+          }),
+        });
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          {
+            id: "msg-1",
+            role: "assistant",
+            content: "Working...",
+            status: "streaming",
+            timestamp: "2026-05-01T10:00:00Z",
+          },
+        ]),
+      });
+    });
+
+    await page.reload();
+
+    const input = page.getByTestId("message-input");
+    await input.fill("queued prompt");
+    await input.press("Enter");
+
+    // The queued prompt is appended to the message list as a user bubble
+    // with distinct queued styling — no separate queue strip.
+    const messageList = page.getByTestId("message-list");
+    const queuedBubble = messageList
+      .getByTestId("message-user")
+      .filter({ hasText: "queued prompt" });
+    await expect(queuedBubble).toBeVisible();
+    await expect(queuedBubble.getByTestId("message-queued-marker")).toContainText(
+      "Queued",
+    );
+    await expect(queuedBubble.getByTestId("message-queued-cancel-btn")).toBeVisible();
+
+    // Cancelling removes the queued state from the bubble — the marker and
+    // cancel control disappear and the prompt reverts to a plain user bubble.
+    await queuedBubble.getByTestId("message-queued-cancel-btn").click();
+    await expect(
+      queuedBubble.getByTestId("message-queued-marker"),
+    ).toHaveCount(0);
+    await expect(
+      queuedBubble.getByTestId("message-queued-cancel-btn"),
+    ).toHaveCount(0);
+  });
 });
