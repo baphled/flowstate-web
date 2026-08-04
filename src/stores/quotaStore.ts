@@ -26,6 +26,7 @@ import type {
   SSEProviderQuotaRateLimit,
   SSEProviderQuotaTokenSpend,
   SSEProviderQuotaNotConfig,
+  SSEProviderStatusChangedEvent,
 } from "@/lib/sseEvent";
 
 /**
@@ -45,6 +46,8 @@ export interface ProviderQuotaSnapshot {
   rateLimit: SSEProviderQuotaRateLimit | null;
   tokenSpend: SSEProviderQuotaTokenSpend | null;
   notConfigured: SSEProviderQuotaNotConfig | null;
+  rateLimitedUntil: string;
+  status: string;
 }
 
 /**
@@ -88,7 +91,9 @@ export function providerQuotaSnapshotEqual(
     a.stale !== b.stale ||
     a.storeBackend !== b.storeBackend ||
     a.pricingSource !== b.pricingSource ||
-    a.variant !== b.variant
+    a.variant !== b.variant ||
+    a.rateLimitedUntil !== b.rateLimitedUntil ||
+    a.status !== b.status
   ) {
     return false;
   }
@@ -118,11 +123,32 @@ interface QuotaStoreState {
    * not bleed into the new session's empty chip).
    */
   snapshots: Record<string, ProviderQuotaSnapshot>;
+
+  /**
+   * optimisticStatuses — per `<provider>:<model>` key, tracks the most
+   * recent status transition received via the provider.status_changed
+   * SSE stream. The chip uses this to show an immediate state indicator
+   * (rate-limited blink, exhausted warning) without waiting for the
+   * next provider_quota chunk to arrive.
+   *
+   * Cleared by reset() alongside snapshots. Key is `provider:model`
+   * (no accountHash — the status_changed event is global).
+   */
+  optimisticStatuses: Record<
+    string,
+    {
+      status: string;
+      previousStatus: string;
+      rateLimitedUntil: string;
+      observedAt: string;
+    }
+  >;
 }
 
 export const useQuotaStore = defineStore("quota", {
   state: (): QuotaStoreState => ({
     snapshots: {},
+    optimisticStatuses: {},
   }),
 
   getters: {
@@ -166,6 +192,29 @@ export const useQuotaStore = defineStore("quota", {
         return null;
       };
     },
+
+    /**
+     * currentOptimisticStatusFor returns the most recent optimistic
+     * status for the (provider, model) pair, or null when no status
+     * transition has been received via the provider.status_changed
+     * stream. The chip can gate on this to show rate-limit blink /
+     * exhaustion / spend-at-cap indicators ahead of the next quota
+     * snapshot.
+     */
+    currentOptimisticStatusFor: (state) => {
+      return (
+        provider: string,
+        model: string,
+      ): {
+        status: string;
+        previousStatus: string;
+        rateLimitedUntil: string;
+        observedAt: string;
+      } | null => {
+        const key = `${provider}:${model}`;
+        return state.optimisticStatuses[key] ?? null;
+      };
+    },
   },
 
   actions: {
@@ -193,6 +242,8 @@ export const useQuotaStore = defineStore("quota", {
         rateLimit: event.rateLimit,
         tokenSpend: event.tokenSpend,
         notConfigured: event.notConfigured,
+        rateLimitedUntil: event.rateLimitedUntil,
+        status: event.status,
       };
       const key = snapshotKey(event.provider, event.accountHash, event.model);
       // Phase-5 §1c-β idempotency gate. The transitional state has two
@@ -219,16 +270,37 @@ export const useQuotaStore = defineStore("quota", {
     },
 
     /**
-     * reset clears all in-memory snapshots. Fired on session change
-     * from the chat store's loadSessionMessages so the chip starts
-     * blank in the new session and re-hydrates from the SSE
-     * re-attach. Per memory `feedback_response_ok_mock_gotcha` and
-     * the Pinia post-mount seed gotcha — the chip's onMounted hook
-     * should NOT call reset (it would clobber a seed dispatched
-     * pre-mount); reset is a session-change action only.
+     * applyOptimisticStatus ingests a parsed SSE provider.status_changed
+     * event and updates the optimistic status map. Called from the chat
+     * store's applyContentEvent dispatcher when
+     * `event.kind === 'provider.status_changed'`.
+     *
+     * The chip can branch on this status to show immediate visual feedback
+     * (rate-limit blink, exhausted warning) without waiting for the next
+     * provider_quota chunk to arrive.
+     */
+    applyOptimisticStatus(event: SSEProviderStatusChangedEvent): void {
+      const key = `${event.provider}:${event.model}`;
+      this.optimisticStatuses = {
+        ...this.optimisticStatuses,
+        [key]: {
+          status: event.status,
+          previousStatus: event.previousStatus,
+          rateLimitedUntil: event.rateLimitedUntil,
+          observedAt: event.observedAt,
+        },
+      };
+    },
+
+    /**
+     * reset clears all in-memory snapshots and optimistic statuses.
+     * Fired on session change from the chat store's loadSessionMessages
+     * so the chip starts blank in the new session and re-hydrates from
+     * the SSE re-attach.
      */
     reset(): void {
       this.snapshots = {};
+      this.optimisticStatuses = {};
     },
   },
 });

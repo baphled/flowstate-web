@@ -52,6 +52,8 @@ function buildRateLimitEvent(): SSEProviderQuotaEvent {
     },
     tokenSpend: null,
     notConfigured: null,
+    rateLimitedUntil: "",
+    status: "healthy",
   };
 }
 
@@ -80,6 +82,8 @@ function buildTokenSpendEvent(): SSEProviderQuotaEvent {
       thresholdRed: 95,
     },
     notConfigured: null,
+    rateLimitedUntil: "",
+    status: "spent",
   };
 }
 
@@ -97,6 +101,8 @@ function buildNotConfiguredEvent(): SSEProviderQuotaEvent {
     rateLimit: null,
     tokenSpend: null,
     notConfigured: { reason: "local-model" },
+    rateLimitedUntil: "",
+    status: "",
   };
 }
 

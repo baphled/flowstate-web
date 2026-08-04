@@ -2768,7 +2768,7 @@ export const useChatStore = defineStore('chat', {
             } else if (snap.variant === 'not_configured') {
               figure = snap.not_configured?.reason ?? ''
             }
-            const sig = `${snap.observed_at}:${snap.variant}:${figure}`
+            const sig = `${snap.observed_at}:${snap.variant}:${figure}:${snap.status ?? ''}`
             if (sig === lastPollQuotaKeys[partitionKey]) {
               continue
             }
@@ -2791,6 +2791,8 @@ export const useChatStore = defineStore('chat', {
               storeBackend: snap.store_backend ?? '',
               pricingSource: snap.pricing_source ?? '',
               variant: snap.variant,
+              rateLimitedUntil: snap.rate_limited_until ?? '',
+              status: snap.status ?? '',
               rateLimit: rl
                 ? {
                     requests: {
@@ -3827,6 +3829,9 @@ export const useChatStore = defineStore('chat', {
           return
         case 'provider_quota':
           useQuotaStore().applyProviderQuotaEvent(event)
+          return
+        case 'provider.status_changed':
+          useQuotaStore().applyOptimisticStatus(event)
           return
         case 'streaming_heartbeat':
           return
