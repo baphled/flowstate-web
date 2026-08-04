@@ -1,11 +1,5 @@
 <script lang="ts">
-// Render-cap constants. Hard-cap the visible slice to keep <pre> layout
-// cheap on the main thread; users can opt in to the full body via the
-// "Show full output" toggle. The cap is purely visual — the agent-side
-// truncation in internal/tool/truncate already enforces the contract
-// the model sees.
-export const RENDER_MAX_LINES = 200;
-export const RENDER_MAX_BYTES = 8 * 1024;
+export { RENDER_MAX_LINES, RENDER_MAX_BYTES } from "./bashToolConstants";
 </script>
 
 <script setup lang="ts">
@@ -13,6 +7,7 @@ import { ref, computed } from "vue";
 import CopyButton from "./CopyButton.vue";
 import ToolBubble from "./ToolBubble.vue";
 import type { ToolRendererProps } from "./toolRendererProps";
+import { RENDER_MAX_LINES, RENDER_MAX_BYTES } from "./bashToolConstants";
 
 const props = withDefaults(defineProps<ToolRendererProps>(), {
   status: "completed",
@@ -114,8 +109,9 @@ function toggle() {
           class="bash-tool-truncation-hint"
           data-component="bash-output-truncation-hint"
         >
-          {{ renderSlice.hiddenLines }} lines hidden — click "Show full output"
-          to view all.
+          {{ renderSlice.hiddenLines }} lines hidden. Prefer commands with
+          narrower output. For more detail use grep, sort, or cat. Click
+          "Show full output" to view all.
         </p>
         <button
           v-if="bodyTruncated"

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { mount } from "@vue/test-utils";
-import BashTool, { RENDER_MAX_LINES, RENDER_MAX_BYTES } from "./BashTool.vue";
+import BashTool from "./BashTool.vue";
+import { RENDER_MAX_LINES, RENDER_MAX_BYTES } from "./bashToolConstants";
 
 const CopyButton = {
   props: {
@@ -198,6 +199,10 @@ describe("BashTool", () => {
         '[data-component="bash-output-truncation-hint"]',
       );
       expect(hint.text()).toContain(`${500 - RENDER_MAX_LINES} lines hidden`);
+      expect(hint.text()).toContain("grep");
+      expect(hint.text()).toContain("sort");
+      expect(hint.text()).toContain("cat");
+      expect(hint.text()).toContain("Show full output");
 
       const toggle = wrapper.get('[data-component="bash-output-toggle"]');
       expect(toggle.attributes("aria-label")).toBe("Show full output");
