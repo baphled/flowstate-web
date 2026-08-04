@@ -137,6 +137,19 @@ function resolvePrimaryValue(
   return compactJSONFallback(args);
 }
 
+function formatHeadingValue(
+  toolName: string,
+  rawValue: string,
+): string {
+  // Bash commands are never truncated so the full command is always visible.
+  // All other tools keep the 80-char cap to prevent huge JSON blobs from
+  // blowing up the card.
+  if (toolName === "bash") {
+    return rawValue;
+  }
+  return truncate(rawValue);
+}
+
 function resolveHeading(
   toolName: string,
   parsed: Record<string, unknown> | string | null,
@@ -147,14 +160,14 @@ function resolveHeading(
   if (typeof parsed === "string") {
     // Backend persisted a bare-string ToolInput (e.g. older sessions, or the
     // hand-coded path before the unification). Render it directly.
-    return `${toolName} ${truncate(parsed)}`;
+    return `${toolName} ${formatHeadingValue(toolName, parsed)}`;
   }
 
   const value = resolvePrimaryValue(toolName, parsed);
   if (value === null || value === "") {
     return toolName;
   }
-  return `${toolName} ${truncate(value)}`;
+  return `${toolName} ${formatHeadingValue(toolName, value)}`;
 }
 
 /**
@@ -169,7 +182,7 @@ function skillLoadHeading(parsed: Record<string, unknown> | string | null): stri
   } else if (typeof parsed === "string") {
     skillName = parsed;
   }
-  return `-> Skill: ${skillName}`;
+  return `→Skill "${skillName}"`;
 }
 
 /**
@@ -187,11 +200,11 @@ export function buildToolRenderSpec(message: Message): ToolRenderSpec {
   const heading = resolveHeading(toolName, parsed);
   const body = message.role === "tool_result" ? (message.content ?? "") : "";
 
-  // Special-case skill_load: render as "-> Skill: <name>" for both
-  // parsed-object and bare-string persisted input. Keep non-skill tools
-  // unchanged.
+  // Special-case skill_load: render as "→Skill \"<name>\"" for both
+  // parsed-object and bare-string persisted input. Body is hidden —
+  // SkillLoadTool renders an inline label with no output section.
   if (toolName === "skill_load") {
-    return { toolName, heading: skillLoadHeading(parsed), body };
+    return { toolName, heading: skillLoadHeading(parsed), body: "" };
   }
 
   return { toolName, heading, body };

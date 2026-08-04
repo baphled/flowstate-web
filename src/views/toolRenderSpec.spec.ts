@@ -27,11 +27,13 @@ describe("buildToolRenderSpec", () => {
     expect(spec.body).toBe("");
   });
 
-  it("truncates a bash command longer than 80 characters and appends ellipsis", () => {
+  it("shows the full bash command without truncation when longer than 80 characters", () => {
     const longCommand = "x".repeat(120);
     const msg = makeToolMessage("tool_call", "bash", { command: longCommand });
     const spec = buildToolRenderSpec(msg);
-    expect(spec.heading).toBe("bash " + "x".repeat(80) + "...");
+    // Bash commands are never truncated so the full command is always visible.
+    expect(spec.heading).toBe("bash " + longCommand);
+    expect(spec.heading).not.toContain("...");
   });
 
   it("uses filePath as the heading for write tool calls", () => {
@@ -75,9 +77,19 @@ describe("buildToolRenderSpec", () => {
     expect(buildToolRenderSpec(msg).heading).toBe("grep TODO");
   });
 
-  it("renders skill_load with \"-> Skill: <name>\" for parsed-object input", () => {
+  it("renders skill_load with \"→Skill \\\"<name>\\\"\" for parsed-object input", () => {
     const msg = makeToolMessage("tool_call", "skill_load", { name: "vue" });
-    expect(buildToolRenderSpec(msg).heading).toBe("-> Skill: vue");
+    expect(buildToolRenderSpec(msg).heading).toBe('→Skill "vue"');
+  });
+
+  it("suppresses the body for skill_load tool_result messages", () => {
+    const msg = makeToolMessage(
+      "tool_result",
+      "skill_load",
+      { name: "vue" },
+      "Loaded skill: vue",
+    );
+    expect(buildToolRenderSpec(msg).body).toBe("");
   });
 
   it("renders preferred fallback keys for tools outside the allowlist", () => {
@@ -157,7 +169,7 @@ describe("buildToolRenderSpec", () => {
     expect(buildToolRenderSpec(msg).heading).toBe("read /tmp/foo.ts");
   });
 
-  it("renders a persisted bare-string toolInput for skill_load as \"-> Skill: <name>\"", () => {
+  it("renders a persisted bare-string toolInput for skill_load as \"→Skill \\\"<name>\\\"\"", () => {
     const msg: Message = {
       id: "t-bare-skill",
       role: "tool_call",
@@ -166,7 +178,7 @@ describe("buildToolRenderSpec", () => {
       toolName: "skill_load",
       toolInput: "pre-action",
     };
-    expect(buildToolRenderSpec(msg).heading).toBe("-> Skill: pre-action");
+    expect(buildToolRenderSpec(msg).heading).toBe('→Skill "pre-action"');
   });
 
   it("truncates long fallback values at 80 characters with an ellipsis", () => {
