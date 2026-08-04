@@ -451,6 +451,43 @@ const isFailedSend = computed(
   () => props.message.role === "user" && props.message.status === "failed",
 );
 
+// Backend-owned prompt queue (May 2026) — transient status indicators on
+// user bubbles. 'queued' means the backend accepted the prompt into its
+// per-session queue (202) and it is waiting for a turn slot; 'cancelled'
+// means the user retracted it via DELETE /queue/{prompt_id}; 'session-ended'
+// is the terminal state when a queued prompt never starts (session deleted
+// or the watch budget elapsed). Each surfaces as a small role="status"
+// chip mirroring the failed-marker affordance.
+const isQueuedPrompt = computed(
+  () => props.message.role === "user" && props.message.status === "queued",
+);
+const isCancelledPrompt = computed(
+  () => props.message.role === "user" && props.message.status === "cancelled",
+);
+const isSessionEndedPrompt = computed(
+  () => props.message.role === "user" && props.message.status === "session-ended",
+);
+const queuedPositionLabel = computed(() =>
+  typeof props.message.queuePosition === "number"
+    ? `Queued · position ${props.message.queuePosition}`
+    : "Queued",
+);
+
+// Per-message cancel affordance (inline queued bubbles — May 2026 refactor).
+// The queue is no longer a separate strip below the thread; the queued user
+// bubble itself carries the cancel control. Wired to the SAME store action
+// the strip used (cancelQueuedPrompt → DELETE /sessions/{id}/queue/{prompt_id})
+// so the queue state machine and API contract are untouched. Only present
+// while the prompt is still queued and carries a backend promptId; once the
+// turn starts (status flips to 'streaming') the bubble drops the queued
+// chrome and this control disappears with it.
+async function handleCancelQueued(): Promise<void> {
+  const promptId = props.message.promptId
+  const sessionId = chatStore.currentSessionId
+  if (!promptId || !sessionId) return
+  await chatStore.cancelQueuedPrompt(sessionId, promptId)
+}
+
 // Runtime-gate denial detector (May 2026 — PR7 follow-up to commit 4b25f026).
 //
 // The engine's runtime tool gate at engine.go:4459-4475 rejects a tool
@@ -576,7 +613,13 @@ async function handleRegenerate(): Promise<void> {
   <div
     v-if="hasRenderableContent"
     class="message-bubble"
-    :class="[props.message.role, { 'message-bubble--failed': isFailedSend }]"
+    :class="[
+      props.message.role,
+      {
+        'message-bubble--failed': isFailedSend,
+        'message-bubble--queued': isQueuedPrompt,
+      },
+    ]"
     :data-testid="`message-${props.message.role}`"
     :data-role="props.message.role"
     :data-status="props.message.status ?? ''"
@@ -947,6 +990,43 @@ async function handleRegenerate(): Promise<void> {
           title="Message failed to send"
           >&#x26A0; Failed to send</span
         >
+        <span
+          v-else-if="isQueuedPrompt"
+          class="queued-badge"
+          data-testid="message-queued-marker"
+          role="status"
+          :title="queuedPositionLabel"
+        >
+          <span class="queued-badge-icon" aria-hidden="true">&#x23F3;</span>
+          <span class="queued-badge-label">{{ queuedPositionLabel }}</span>
+        </span>
+        <span
+          v-else-if="isCancelledPrompt"
+          class="failed-marker"
+          data-testid="message-cancelled-marker"
+          role="status"
+          title="Queued prompt cancelled"
+          >&#x2715; Cancelled</span
+        >
+        <span
+          v-else-if="isSessionEndedPrompt"
+          class="failed-marker"
+          data-testid="message-session-ended-marker"
+          role="status"
+          title="The session ended before this queued prompt started"
+          >&#x26A0; Session ended</span
+        >
+        <button
+          v-if="isQueuedPrompt && props.message.promptId"
+          type="button"
+          class="queued-cancel-button"
+          data-testid="message-queued-cancel-btn"
+          title="Cancel queued prompt"
+          @click="handleCancelQueued"
+        >
+          <span aria-hidden="true">&#x2715;</span>
+          <span class="queued-cancel-text">Cancel</span>
+        </button>
         <button
           v-if="showRevertButton"
           type="button"
@@ -1088,6 +1168,72 @@ async function handleRegenerate(): Promise<void> {
  * complements it. */
 .message-bubble--failed.message-bubble.user {
   border-color: var(--danger, #f87171);
+}
+
+/* Inline queued prompt bubble (May 2026 refactor). Distinct from a normal
+ * user bubble and from a failed send: the prompt has been accepted into the
+ * backend queue (202) and is waiting for a turn slot. An amber/warning tint
+ * on the border + a subtle elevated background set it apart from the plain
+ * user bubble so the user can see at a glance which prompts are pending. */
+.message-bubble--queued.message-bubble.user {
+  border-color: var(--warning, #e0af68);
+  background: var(--bg-elevated, var(--user-bubble));
+}
+
+/* Queued badge — the "Queued · position N" chip on an inline queued bubble.
+ * Uses the warning palette (same register as the thinking-only affordance)
+ * so it reads as "pending, not failed". role="status" is set in the markup. */
+.queued-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: var(--bg-secondary, transparent);
+  border: 1px solid var(--warning, #e0af68);
+  color: var(--warning, #e0af68);
+  font-size: 0.72rem;
+  user-select: none;
+  letter-spacing: 0.02em;
+}
+
+.queued-badge-icon {
+  line-height: 1;
+}
+
+.queued-badge-label {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Per-message cancel control on an inline queued bubble. Mirrors the
+ * revert-button affordance (muted text button) but uses the danger tint on
+ * hover so the destructive action is discoverable without shouting. */
+.queued-cancel-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding: 0.15rem 0.3rem;
+  border-radius: var(--radius);
+  font-family: inherit;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+
+.queued-cancel-button:hover {
+  color: var(--danger, #f87171);
+  background: var(--bg-elevated);
+}
+
+.queued-cancel-text {
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 0.7rem;
 }
 
 /* Tool blocks: collapsed by default, expand on click. opencode TUI vibe. */

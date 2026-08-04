@@ -17,7 +17,6 @@ import QuotaChip from '@/components/chat/QuotaChip.vue'
 import CriticalErrorBanner from '@/components/chat/CriticalErrorBanner.vue'
 import MessageBubble from '@/components/chat/MessageBubble.vue'
 import MessageInput from '@/components/chat/MessageInput.vue'
-import QueuedPromptStrip from '@/components/chat/QueuedPromptStrip.vue'
 import TodoListPanel from '@/components/chat/TodoListPanel.vue'
 import EmptyChatState from '@/components/chat/EmptyChatState.vue'
 import AgentPicker from '@/components/agent-picker/AgentPicker.vue'
@@ -820,12 +819,12 @@ onBeforeUnmount(() => {
       </div>
 
       <!--
-        Slice E (May 2026) — queued prompts rendered between the
-        thread and the composer. Submit-while-streaming pushes onto
-        the queue rather than bouncing the prompt; clicking X reverts
-        the prompt into the composer for edit-then-resend.
+        Queued prompts (May 2026) render INLINE in the chat thread as user
+        bubbles with distinct queued styling (see MessageBubble's
+        message-bubble--queued chrome). Each queued bubble carries its own
+        cancel control wired to DELETE /sessions/{id}/queue/{prompt_id} via
+        the store. The composer below stays enabled while prompts are queued.
       -->
-      <QueuedPromptStrip />
 
       <!--
         QW-11 — Delegated child sessions are read-only. The composer is

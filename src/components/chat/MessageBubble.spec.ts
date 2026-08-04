@@ -102,6 +102,7 @@ describe("MessageBubble", () => {
 
     mockChatStore = {
       messages: [],
+      currentSessionId: "session-1",
       loadSessionByAgentId: vi.fn(),
       // Bug Hunt (May 2026) sibling-confusion fix — MessageBubble's
       // delegation-card click now routes through loadSessionForDelegation
@@ -116,6 +117,9 @@ describe("MessageBubble", () => {
       pendingPermissionRequests: {},
       grantingPermissionRequests: new Set<string>(),
       grantPermission: vi.fn(),
+      // Backend-owned prompt queue (May 2026) — the inline queued-bubble
+      // cancel control calls cancelQueuedPrompt(sessionId, promptId).
+      cancelQueuedPrompt: vi.fn(),
     };
     vi.mocked(useChatStore).mockReturnValue(mockChatStore);
   });
@@ -894,6 +898,153 @@ describe("MessageBubble", () => {
       );
 
       expect(wrapper.attributes("data-status")).toBe("failed");
+    });
+  });
+
+  describe("queued prompt markers", () => {
+    it("renders the queued marker with the backend queue position", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          role: "user",
+          content: "queued prompt",
+          status: "queued",
+          queuePosition: 3,
+        }),
+      );
+
+      const marker = wrapper.find('[data-testid="message-queued-marker"]');
+      expect(marker.exists()).toBe(true);
+      expect(marker.text()).toContain("Queued");
+      expect(marker.text()).toContain("3");
+      expect(marker.attributes("title")).toBe("Queued · position 3");
+    });
+
+    it("renders the cancelled marker for queued prompts that were retracted", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          role: "user",
+          content: "queued prompt",
+          status: "cancelled",
+        }),
+      );
+
+      const marker = wrapper.find('[data-testid="message-cancelled-marker"]');
+      expect(marker.exists()).toBe(true);
+      expect(marker.text()).toMatch(/cancelled/i);
+    });
+
+    it("renders the session-ended marker when the backend never started the queued prompt", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          role: "user",
+          content: "queued prompt",
+          status: "session-ended",
+        }),
+      );
+
+      const marker = wrapper.find('[data-testid="message-session-ended-marker"]');
+      expect(marker.exists()).toBe(true);
+      expect(marker.text()).toMatch(/session ended/i);
+    });
+  });
+
+  // Inline queued-bubble cancel affordance (May 2026 refactor). The queue is
+  // no longer a separate strip below the thread; the queued user bubble
+  // itself carries the per-message cancel control, wired to the SAME store
+  // action the strip used (cancelQueuedPrompt → DELETE /queue/{prompt_id}).
+  describe("queued prompt cancel affordance", () => {
+    it("renders a cancel button on a queued user bubble that carries a promptId", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          role: "user",
+          content: "queued prompt",
+          status: "queued",
+          promptId: "prompt-1",
+          queuePosition: 2,
+        }),
+      );
+
+      const cancel = wrapper.find('[data-testid="message-queued-cancel-btn"]');
+      expect(cancel.exists()).toBe(true);
+      expect(cancel.text()).toMatch(/cancel/i);
+    });
+
+    it("calls cancelQueuedPrompt with the active session and the bubble's promptId when cancelled", async () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          role: "user",
+          content: "queued prompt",
+          status: "queued",
+          promptId: "prompt-1",
+          queuePosition: 2,
+        }),
+      );
+
+      await wrapper
+        .get('[data-testid="message-queued-cancel-btn"]')
+        .trigger("click");
+
+      expect(mockChatStore.cancelQueuedPrompt).toHaveBeenCalledWith(
+        "session-1",
+        "prompt-1",
+      );
+    });
+
+    it("does NOT render the cancel button on a queued bubble without a promptId", () => {
+      // The cancel key is the backend promptId; without it there is nothing
+      // to DELETE. The queued marker still renders, just no cancel control.
+      const wrapper = mountWithStubs(
+        makeMessage({
+          role: "user",
+          content: "queued prompt",
+          status: "queued",
+        }),
+      );
+
+      expect(
+        wrapper.find('[data-testid="message-queued-cancel-btn"]').exists(),
+      ).toBe(false);
+      expect(wrapper.find('[data-testid="message-queued-marker"]').exists()).toBe(
+        true,
+      );
+    });
+
+    it("does NOT render the cancel button on a normal (non-queued) user message", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({ role: "user", content: "plain prompt" }),
+      );
+
+      expect(
+        wrapper.find('[data-testid="message-queued-cancel-btn"]').exists(),
+      ).toBe(false);
+    });
+
+    it("does NOT render the cancel button on a cancelled or session-ended prompt", () => {
+      // Terminal queued states have no pending DELETE — the affordance is
+      // strictly for the still-queued state.
+      const cancelled = mountWithStubs(
+        makeMessage({
+          role: "user",
+          content: "queued prompt",
+          status: "cancelled",
+          promptId: "prompt-1",
+        }),
+      );
+      const ended = mountWithStubs(
+        makeMessage({
+          role: "user",
+          content: "queued prompt",
+          status: "session-ended",
+          promptId: "prompt-1",
+        }),
+      );
+
+      expect(
+        cancelled.find('[data-testid="message-queued-cancel-btn"]').exists(),
+      ).toBe(false);
+      expect(
+        ended.find('[data-testid="message-queued-cancel-btn"]').exists(),
+      ).toBe(false);
     });
   });
 
