@@ -46,6 +46,8 @@ function baseEvent(): SSEProviderQuotaEvent {
     rateLimit: null,
     tokenSpend: null,
     notConfigured: { reason: "awaiting-first-response" },
+    rateLimitedUntil: "",
+    status: "",
   };
 }
 
@@ -324,17 +326,12 @@ describe("QuotaChip", () => {
       ).toBe("warning");
     });
 
-    it('emits an "open" event when the chip is clicked (token_spend variant)', async () => {
+    it('emits an "open" event when the chip is clicked (any variant)', async () => {
       const wrapper = await mountWithEvent(tokenSpendEvent(241, 5000));
       await wrapper
         .find('[data-testid="provider-quota-chip"]')
         .trigger("click");
       expect(wrapper.emitted("open")).toHaveLength(1);
-      expect(wrapper.emitted("open")?.[0]?.[0]).toMatchObject({
-        variant: "token_spend",
-        provider: PROVIDER,
-        model: MODEL,
-      });
     });
   });
 
@@ -377,14 +374,14 @@ describe("QuotaChip", () => {
       );
     });
 
-    it('does not emit "open" on click (only token_spend opens the panel)', async () => {
+    it('emits "open" on click for all variants including not_configured', async () => {
       const wrapper = await mountWithEvent(
         notConfiguredEvent("subscription-only"),
       );
       await wrapper
         .find('[data-testid="provider-quota-chip"]')
         .trigger("click");
-      expect(wrapper.emitted("open")).toBeUndefined();
+      expect(wrapper.emitted("open")).toHaveLength(1);
     });
   });
 

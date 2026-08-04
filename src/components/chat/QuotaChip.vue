@@ -219,22 +219,18 @@ const tooltipTitle = computed(() => {
 });
 
 /**
- * Click emit — PR4a wires the click to a parent-handled event;
- * PR4b will add the ProviderQuotaPanel modal. For PR4a the parent
- * gets the event but no panel renders yet (out of PR4 scope).
+ * Click emit — opens the ProviderQuotaSummaryModal on click for any
+ * variant. The summary modal shows all known provider/model snapshots
+ * and supports drilling into the deep ProviderQuotaPanel for any row.
  */
 const emit = defineEmits<{
-  open: [snapshot: ProviderQuotaSnapshot];
+  open: [];
 }>();
 
 function handleClick(): void {
   const s = snapshot.value;
   if (s === null) return;
-  // Only TokenSpend opens the panel — RateLimit and NotConfigured
-  // have nothing additional to drill into in PR4a.
-  if (s.variant === "token_spend") {
-    emit("open", s);
-  }
+  emit("open");
 }
 </script>
 
@@ -305,13 +301,6 @@ function handleClick(): void {
   font-family: var(--font-mono, ui-monospace, monospace);
   color: var(--text-muted, #b0b0b0);
   flex-shrink: 0;
-  cursor: default;
-}
-
-.quota-chip[data-variant="token_spend"] {
-  /* TokenSpend is the only variant the click-handler emits 'open' for; the
-   * cursor disambiguates affordance from the RateLimit / NotConfigured
-   * branches which are read-only. PR4b adds the actual panel. */
   cursor: pointer;
 }
 
