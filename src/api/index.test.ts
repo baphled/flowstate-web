@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { sendSessionMessage, fetchTurn } from "./index";
+import {
+  sendSessionMessage,
+  fetchTurn,
+  cancelQueuedPrompt,
+  QueueFullError,
+  QueuedPromptNotFoundError,
+} from "./index";
 
 describe("sendSessionMessage", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -72,7 +78,8 @@ describe("sendSessionMessage", () => {
 
     const result = await sendSessionMessage("sess-1", "hello");
 
-    expect(result).toMatchObject({ turnId: "turn-abc" });
+    if (result.queued) throw new Error("expected non-queued result");
+    expect(result.turnId).toBe("turn-abc");
     expect(result.snapshot.id).toBe("sess-1");
     expect(result.snapshot.messages.length).toBe(1);
   });
@@ -104,6 +111,7 @@ describe("sendSessionMessage", () => {
 
     const result = await sendSessionMessage("sess-1", "hello");
 
+    if (result.queued) throw new Error("expected non-queued result");
     expect(result.turnId).toBeNull();
     expect(result.snapshot.id).toBe("sess-1");
   });
@@ -133,7 +141,156 @@ describe("sendSessionMessage", () => {
 
     const result = await sendSessionMessage("sess-1", "hello");
 
+    if (result.queued) throw new Error("expected non-queued result");
     expect(result.turnId).toBeNull();
+  });
+
+  // Backend-owned prompt queue (May 2026) — HTTP 202 queued response.
+  // When the session's turn slot is busy the backend accepts the prompt
+  // into its per-session queue with a 202 + status "queued". The FE
+  // mirrors the entry locally (promptId + queuePosition) instead of
+  // keeping a client-side copy, so the response must be discriminated
+  // from the normal turn_id/snapshot shape.
+  it("returns a queued result with promptId + queuePosition on 202 status queued", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          status: "queued",
+          session_id: "sess-1",
+          queuePosition: 2,
+          promptId: "prompt-abc",
+        }),
+        { status: 202, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const result = await sendSessionMessage("sess-1", "hello");
+
+    expect(result.queued).toBe(true);
+    if (result.queued) {
+      expect(result.sessionId).toBe("sess-1");
+      expect(result.promptId).toBe("prompt-abc");
+      expect(result.queuePosition).toBe(2);
+    }
+  });
+
+  // 429 "queue full" is the loud rejection path. The store pauses
+  // submissions for a window and restores the draft; the API layer's job
+  // is to throw a typed error so the store can branch without string
+  // matching on the body.
+  it("throws QueueFullError on HTTP 429", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "queue full" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    let error: unknown;
+    try {
+      await sendSessionMessage("sess-1", "hello");
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(QueueFullError);
+    expect((error as Error).message).toMatch(/queue.*full/i);
+  });
+
+  // Defence-in-depth: a non-queue 202 (some intermediate proxy or a
+  // future backend shape) must fall through to the normal turn_id/snapshot
+  // normalisation instead of crashing or being misread as a queued result.
+  it("normalises a 202 without status queued to the turn shape", async () => {
+    const sessionPayload = {
+      id: "sess-1",
+      agentId: "agent-1",
+      messages: [],
+      messageCount: 0,
+      status: "active",
+      depth: 0,
+      isStreaming: false,
+      createdAt: "",
+      updatedAt: "",
+    };
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ...sessionPayload,
+          turn_id: "turn-202",
+          snapshot: sessionPayload,
+        }),
+        { status: 202, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const result = await sendSessionMessage("sess-1", "hello");
+
+    expect(result.queued).toBe(false);
+    if (result.queued) throw new Error("expected non-queued result");
+    expect(result.turnId).toBe("turn-202");
+  });
+});
+
+describe("cancelQueuedPrompt", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends a DELETE to the queue endpoint and returns status cancelled on 200", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ status: "cancelled" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const result = await cancelQueuedPrompt("sess-1", "prompt-abc");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/sessions/sess-1/queue/prompt-abc");
+    expect(init?.method).toBe("DELETE");
+    expect(result).toMatchObject({ status: "cancelled" });
+  });
+
+  it("treats a 204 No Content as a successful cancel", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, { status: 204 }),
+    );
+
+    const result = await cancelQueuedPrompt("sess-1", "prompt-abc");
+
+    expect(result).toMatchObject({ status: "cancelled" });
+  });
+
+  it("throws QueuedPromptNotFoundError on 404", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "queued prompt not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    let error: unknown;
+    try {
+      await cancelQueuedPrompt("sess-1", "prompt-ghost");
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(QueuedPromptNotFoundError);
   });
 });
 

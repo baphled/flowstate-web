@@ -208,6 +208,50 @@ export interface SendSessionMessageOptions {
 }
 
 /**
+ * SendSessionMessageQueuedResult is the wire-adapted shape returned when
+ * the backend accepts a prompt into its per-session prompt queue instead
+ * of starting a turn (HTTP 202). Carries the stable promptId used as the
+ * cancel key for DELETE /sessions/{id}/queue/{prompt_id} and the queue
+ * position the backend assigned.
+ */
+export interface SendSessionMessageQueuedResult {
+  queued: true;
+  /** Backend session id echoed from the 202 payload. */
+  sessionId: string;
+  /** Backend-minted prompt id — stable cancel key. */
+  promptId: string;
+  /** 1-based position inside the backend's per-session queue. */
+  queuePosition: number;
+}
+
+/**
+ * QueueFullError — thrown by sendSessionMessage when the POST returns
+ * HTTP 429 (the per-session prompt queue is full). The chatStore catches
+ * this to pause submissions for a short window WITHOUT disabling the
+ * composer input.
+ */
+export class QueueFullError extends Error {
+  constructor() {
+    super("Queue is full");
+    this.name = "QueueFullError";
+  }
+}
+
+/**
+ * QueuedPromptNotFoundError — thrown by cancelQueuedPrompt when the
+ * DELETE /sessions/{id}/queue/{prompt_id} returns 404 (the queued prompt
+ * is already running, already cancelled, or the id was never valid).
+ * Callers treat it as an idempotent success: there is nothing left to
+ * cancel, so the local queue entry can be dropped.
+ */
+export class QueuedPromptNotFoundError extends Error {
+  constructor() {
+    super("Queued prompt not found");
+    this.name = "QueuedPromptNotFoundError";
+  }
+}
+
+/**
  * SendSessionMessageResult is the Phase-3 wire-adapted shape returned by
  * sendSessionMessage. Phase 2 (server commit 9e398807) introduced two
  * additive fields on the POST /api/v1/sessions/{id}/messages response —
@@ -227,14 +271,19 @@ export interface SendSessionMessageOptions {
  *                data; we keep the flat fields as the snapshot for
  *                pre-Phase-2 server compatibility.
  *
+ * Prompt-queue (per-session queue plan, May 2026): when the session is
+ * already busy the POST returns 202 with {status:"queued", session_id,
+ * queuePosition, promptId} instead of minting a turn. That wire shape is
+ * adapted to SendSessionMessageQueuedResult so the chat store branches
+ * on `result.queued` to route the prompt into the backend-owned queue.
+ *
  * Plan reference:
  *   ~/vaults/baphled/1. Projects/FlowState/Plans/
  *     Turn-Based Post-Then-Poll Architecture (May 2026).md
  */
-export interface SendSessionMessageResult {
-  turnId: string | null;
-  snapshot: Session;
-}
+export type SendSessionMessageResult =
+  | SendSessionMessageQueuedResult
+  | { queued: false; turnId: string | null; snapshot: Session };
 
 export async function sendSessionMessage(
   sessionId: string,
@@ -260,9 +309,40 @@ export async function sendSessionMessage(
       signal: options?.signal,
     },
   );
+  if (res.status === 429) {
+    throw new QueueFullError();
+  }
   if (!res.ok) {
     throw new Error(await parseError(res));
   }
+  // The response body can only be read once, so parse it a single time
+  // and branch on the status + payload below. The 202 queued shape and
+  // the Phase-2 turn shape share the same JSON surface (the queued shape
+  // adds status/session_id/queuePosition/promptId on top of the flat
+  // Session fields), so one parse covers both paths.
+  const parsed = (await res.json()) as Session & {
+    turn_id?: string;
+    snapshot?: Session;
+    status?: string;
+    session_id?: string;
+    queuePosition?: number;
+    promptId?: string;
+  };
+  if (res.status === 202 && parsed.status === "queued") {
+    // Per-session prompt queue (May 2026): the session is busy, the
+    // backend accepted the prompt into its queue. Wire shape:
+    //   { status: "queued", session_id, queuePosition, promptId }
+    return {
+      queued: true,
+      sessionId: typeof parsed.session_id === "string" ? parsed.session_id : sessionId,
+      promptId: typeof parsed.promptId === "string" ? parsed.promptId : "",
+      queuePosition: typeof parsed.queuePosition === "number" ? parsed.queuePosition : 1,
+    };
+  }
+  // A 202 that is not the queue shape is a contract violation — fall
+  // through to the normalisation below so the caller surfaces the
+  // server's body rather than silently mis-routing.
+  //
   // Phase 2 wire shape:
   //   {
   //     ...SessionResponse,        // legacy flat fields (id, agentId, messages, ...)
@@ -277,15 +357,50 @@ export async function sendSessionMessage(
   //     falls back to SSE.
   // snapshot is the body itself (flat) when no nested snapshot was
   // provided — the flat fields ARE the Session.
-  const parsed = (await res.json()) as Session & {
-    turn_id?: string;
-    snapshot?: Session;
-  };
   const rawTurnId = typeof parsed.turn_id === "string" ? parsed.turn_id : "";
   const turnId = rawTurnId.length > 0 ? rawTurnId : null;
   const snapshot =
     (parsed.snapshot as Session | undefined) ?? (parsed as Session);
-  return { turnId, snapshot };
+  return { queued: false, turnId, snapshot };
+}
+
+/**
+ * cancelQueuedPrompt cancels a queued prompt server-side via
+ * DELETE /api/v1/sessions/{id}/queue/{prompt_id}.
+ *
+ * Responses:
+ *   - 200 {"status":"cancelled"}   → the prompt was cancelled.
+ *   - 204 No Content               → same, idempotent variant.
+ *   - 404 {"error":"queued prompt not found"} → throws
+ *     QueuedPromptNotFoundError so callers can treat it as already-gone
+ *     (idempotent) without surfacing an error to the user.
+ *   - any other non-2xx            → throws Error(parseError).
+ */
+export async function cancelQueuedPrompt(
+  sessionId: string,
+  promptId: string,
+): Promise<{ status: string }> {
+  const res = await fetch(
+    joinBaseURL(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(promptId)}`,
+    ),
+    {
+      method: "DELETE",
+      headers: withCsrfHeader(undefined),
+      credentials: CREDENTIALS_INCLUDE,
+    },
+  );
+  if (res.status === 404) {
+    throw new QueuedPromptNotFoundError();
+  }
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+  if (res.status === 204) {
+    return { status: "cancelled" };
+  }
+  const parsed = (await res.json()) as { status?: string } | null;
+  return { status: parsed?.status ?? "cancelled" };
 }
 
 /**
