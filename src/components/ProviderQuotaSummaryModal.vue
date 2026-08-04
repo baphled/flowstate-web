@@ -190,8 +190,8 @@ function variantIcon(variant: string): string {
           </tr>
         </thead>
         <tbody>
-          <tr
-            v-for="(snap, idx) in allSnapshots"
+            <tr
+            v-for="snap in allSnapshots"
             :key="snapshotKey(snap.provider, snap.accountHash, snap.model)"
             class="summary-row"
             :class="{ 'summary-row--clickable': snap.variant !== 'not_configured' }"

@@ -11,11 +11,11 @@
  *   - Clicking a row emits `select` with the snapshot payload.
  *   - Focus trap is active while open.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { setActivePinia, createPinia } from "pinia";
 import ProviderQuotaSummaryModal from "./ProviderQuotaSummaryModal.vue";
-import { useQuotaStore } from "@/stores/quotaStore";
+import { useQuotaStore, type ProviderQuotaSnapshot } from "@/stores/quotaStore";
 import type { SSEProviderQuotaEvent } from "@/lib/sseEvent";
 
 /**
@@ -270,8 +270,11 @@ describe("ProviderQuotaSummaryModal", () => {
       expect(rows).toHaveLength(1);
       await rows[0].trigger("click");
       expect(wrapper.emitted("select")).toHaveLength(1);
-      const payload = wrapper.emitted("select")?.[0]?.[0];
+      const payload = wrapper.emitted("select")?.[0]?.[0] as
+        | ProviderQuotaSnapshot
+        | undefined;
       expect(payload).toBeDefined();
+      if (payload === undefined) return;
       expect(payload.provider).toBe("anthropic");
       expect(payload.model).toBe("claude-opus-4-7");
       expect(payload.status).toBe("healthy");
