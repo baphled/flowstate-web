@@ -6,3 +6,4 @@ test-results/
 
 # Local environment configuration
 .env.local
+.omo
