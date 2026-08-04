@@ -25,6 +25,7 @@ import ModelPicker from '@/components/model-picker/ModelPicker.vue'
 import ContextToolGroup from '@/components/tools/ContextToolGroup.vue'
 import Icon from '@/components/common/Icon.vue'
 import KeyboardHelpModal from '@/components/common/KeyboardHelpModal.vue'
+import ProviderQuotaSummaryModal from '@/components/ProviderQuotaSummaryModal.vue'
 import { installSessionHierarchyNav } from '@/composables/useSessionHierarchyNav'
 import { showToast } from '@/composables/useToast'
 
@@ -399,6 +400,16 @@ function closeKeyboardHelp(): void {
   keyboardHelpOpen.value = false
 }
 
+const quotaSummaryOpen = ref(false)
+
+function openQuotaSummary(): void {
+  quotaSummaryOpen.value = true
+}
+
+function closeQuotaSummary(): void {
+  quotaSummaryOpen.value = false
+}
+
 // UI Parity PR6 — Collapse all / Expand all toolbar (I4 extension).
 //
 // Flip the store-level override; ToolBubble computes its effective open
@@ -687,7 +698,7 @@ onBeforeUnmount(() => {
           {{ chatStore.currentProviderId }}
         </span>
         <ContextUsageChip />
-        <QuotaChip />
+        <QuotaChip @open="openQuotaSummary" />
         <!--
           Permission Modes (May 2026) — Slice 2. Mounted immediately to
           the left of the ModelPicker so the chip + picker read as one
@@ -869,7 +880,12 @@ onBeforeUnmount(() => {
       Triggered by `?` (no-input-focus) or `Ctrl+/` (always). The modal
       is mounted at the view root so it overlays the entire chat shell.
     -->
-    <KeyboardHelpModal :open="keyboardHelpOpen" @close="closeKeyboardHelp" />
+      <KeyboardHelpModal :open="keyboardHelpOpen" @close="closeKeyboardHelp" />
+      <ProviderQuotaSummaryModal
+        :open="quotaSummaryOpen"
+        @close="closeQuotaSummary"
+        @select="closeQuotaSummary"
+      />
   </div>
 </template>
 
