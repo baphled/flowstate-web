@@ -128,6 +128,48 @@ export interface Message {
    * unavailable.
    */
   elapsedMs?: number;
+  /**
+   * promptId is the backend-minted prompt id from the 202 queued
+   * response (POST /sessions/{id}/messages → status "queued"). Stamped
+   * by the chatStore onto the optimistic user bubble when a prompt is
+   * accepted into the backend's per-session prompt queue. Frontend-only:
+   * the backend Message struct has no matching JSON field, so poll /
+   * reconcile merges preserve it locally.
+   *
+   * Used as the cancel key for DELETE /sessions/{id}/queue/{prompt_id}
+   * and as the join key between the optimistic bubble and its
+   * queued-prompt entry.
+   */
+  promptId?: string;
+  /**
+   * queuePosition is the 1-based position the backend assigned to this
+   * prompt inside its per-session queue (from the same 202 queued
+   * response). Rendered on the queued indicator so the user can see how
+   * many prompts sit ahead of theirs. Frontend-only, like promptId.
+   */
+  queuePosition?: number;
+}
+
+/**
+ * QueuedPromptEntry is the shape stored in the chatStore's per-session
+ * queuedPrompts record (Streaming Coherence Slice E, upgraded to the
+ * backend-owned prompt queue). Rendered by the inline queued user bubble
+ * (MessageBubble's message-bubble--queued chrome) with the prompt text,
+ * its queue position, and a per-message cancel control that calls
+ * DELETE /sessions/{id}/queue/{prompt_id}.
+ *
+ * promptId is the stable backend id from the 202 response — the cancel
+ * key. The entry is created when the backend accepts the prompt (202)
+ * and removed when the prompt's turn starts, is cancelled, or the
+ * session ends without it ever running.
+ */
+export interface QueuedPromptEntry {
+  /** The prompt text the user composed (surfaced on the pill). */
+  text: string;
+  /** Backend queue id — cancel key for DELETE /queue/{prompt_id}. */
+  promptId: string;
+  /** 1-based position assigned by the backend at accept time. */
+  queuePosition: number;
 }
 
 export interface ChatRequest {

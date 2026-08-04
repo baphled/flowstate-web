@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
-import type { Agent, Message, Model, Session, SessionSummary, Swarm } from '@/types'
+import type { Agent, Message, Model, QueuedPromptEntry, Session, SessionSummary, Swarm } from '@/types'
 import {
+  cancelQueuedPrompt as apiCancelQueuedPrompt,
   compactSessionNow,
   createSession,
   deleteSession as apiDeleteSession,
@@ -16,7 +17,10 @@ import {
   updateSessionAgent,
   updateSessionModel,
   updateSessionPermissionMode,
+  QueueFullError,
+  QueuedPromptNotFoundError,
   type PermissionGrantScope,
+  type SendSessionMessageQueuedResult,
   type TurnState,
   type TurnStatePermissionRequest,
 } from '@/api'
@@ -37,6 +41,28 @@ const activeProviderStorageKey = 'chat.selectedProvider'
 // the backend session sidecar; localStorage then becomes an offline
 // fallback only.
 const permissionModeStorageKeyPrefix = 'flowstate.permissionMode.'
+
+// Backend-owned prompt queue (May 2026) — set of session ids with a
+// running watchQueuedPrompts poller. The guard is intentionally
+// NON-reactive (a plain module Set, not Pinia state): it exists only to
+// prevent duplicate pollers for the same session (each 202 would
+// otherwise start a new loop), and no component needs to observe it. One
+// watcher per session drains the entire queue — it loops until the queue
+// is empty, cancelled, or the session ends.
+const activeQueueWatcherSessions = new Set<string>()
+
+// Backend-owned prompt queue (May 2026) — cadence for
+// watchQueuedPrompts. fetchSessions polls at this interval while the
+// session has queued prompts; the poll budget bounds the total watch time
+// (40 × 1.5s ≈ 60s) so a queued prompt that never starts surfaces a
+// terminal session-ended state instead of hanging forever.
+const QUEUE_WATCH_POLL_MS = 1500
+const QUEUE_WATCH_MAX_POLLS = 40
+// Backend-owned prompt queue (May 2026) — how long a 429 queue-full
+// response pauses submissions for the session (ms). Short enough that a
+// busy queue unblocks quickly, long enough that a burst of submits does
+// not hammer the backend. The composer input stays enabled throughout.
+const QUEUE_FULL_PAUSE_MS = 10_000
 
 /**
  * PermissionMode — closed vocabulary mirroring `internal/permissionmode`
@@ -261,6 +287,15 @@ function describeFailoverReason(reason: string): string {
 export function __resetSessionStreams(): void {
   // no-op — retained for backward compat; long-poll has no module-
   // scoped state to reset.
+}
+
+// Backend-owned prompt queue (May 2026) — test seam. The
+// activeQueueWatcherSessions guard Set is module-scoped (deliberately
+// non-reactive), so a watcher parked on a session in one test would
+// otherwise block a later test that watches the same session id.
+// Tests call this in afterEach to clear the Set between cases.
+export function __resetQueueWatchers(): void {
+  activeQueueWatcherSessions.clear()
 }
 
 function getPersistedSessionId(): string | null {
@@ -532,15 +567,39 @@ export const useChatStore = defineStore('chat', {
     // Per-session queued prompts (Slice E — Streaming Coherence May 2026).
     //
     // Pre-slice submit-while-streaming was rejected with a toast ("Send
-    // blocked: an earlier message is still in flight"). The new contract:
-    // submit-while-streaming pushes the prompt onto the session's queue;
-    // when the outer turn completes (handleStreamDone equivalent in the
-    // send finally block), the next queued prompt is auto-submitted.
+    // blocked: an earlier message is still in flight"). The new contract
+    // (backend-owned prompt queue, May 2026): submit-while-streaming
+    // POSTs like any other prompt; the backend replies 202
+    // {status:"queued", session_id, queuePosition, promptId} instead of
+    // minting a turn. This record mirrors the backend's per-session queue
+    // so the inline queued user bubbles (MessageBubble's
+    // message-bubble--queued chrome) can surface the pending prompts with a
+    // per-message cancel control that DELETE /sessions/{id}/queue/{prompt_id}.
+    //
+    // Entries carry the backend promptId (the cancel key) and the
+    // assigned queuePosition. The queued bubble renders the text + position;
+    // the watchQueuedPrompts poller removes entries as their turns start.
     //
     // Per-session keying so cross-session composition does not interfere.
-    // Pinia reactivity proxies the record so the QueuedPromptStrip watcher
+    // Pinia reactivity proxies the record so the queued-bubble watcher
     // re-renders when slots change.
-    queuedPrompts: {} as Record<string, string[]>,
+    queuedPrompts: {} as Record<string, QueuedPromptEntry[]>,
+    // Per-session queue-full pause (backend-owned prompt queue, May 2026).
+    // Maps sessionId → epoch-ms until which submissions are paused after a
+    // 429 queue-full response. The composer input stays ENABLED during the
+    // pause — sendMessage rejects with a surfaced error + restored draft
+    // instead of bouncing silently. Deleted on expiry via the
+    // isQueueFullPaused read (Date.now comparison) and pruned on session
+    // delete alongside queuedPrompts.
+    queueFullUntil: {} as Record<string, number>,
+    // Per-session last-polled turn id (backend-owned prompt queue, May
+    // 2026). Set by pollTurnUntilTerminal for every turn this client
+    // polls. watchQueuedPrompts seeds its "already handled" turn from this
+    // so it waits for the NEXT new activeTurnId — the turn that was busy
+    // when the prompt was queued is never mistaken for the queued prompt's
+    // turn, even when the busy turn completes between the 202 and the
+    // watcher's first poll.
+    lastPollTurnIdBySession: {} as Record<string, string>,
     // Per-session streaming phase (Slice F — Streaming Coherence May 2026).
     //
     // The engine emits `streaming.heartbeat` events carrying a `phase`
@@ -1151,38 +1210,241 @@ export const useChatStore = defineStore('chat', {
       delete this.sessionStreaming[sessionId]
     },
 
-    // queuePromptFor (Slice E — Streaming Coherence May 2026) — push a
-    // prompt onto the named session's queue. The QueuedPromptStrip
-    // watcher re-renders when the slot changes.
-    queuePromptFor(sessionId: string | null, text: string): void {
-      if (!sessionId || !text) return
+    // markPromptQueued (backend-owned prompt queue, May 2026) — apply a
+    // 202 queued response to the optimistic bubble and push the entry
+    // onto the session's queue. Called by sendMessage when
+    // sendSessionMessage returns the queued discriminant. The inline
+    // queued-bubble watcher re-renders when the slot changes.
+    markPromptQueued(
+      sessionId: string,
+      messageId: string,
+      text: string,
+      result: SendSessionMessageQueuedResult,
+    ): void {
+      const msg = this.messages.find((m) => m.id === messageId)
+      if (msg) {
+        msg.status = 'queued'
+        msg.promptId = result.promptId
+        msg.queuePosition = result.queuePosition
+      }
       const existing = this.queuedPrompts[sessionId] ?? []
-      this.queuedPrompts[sessionId] = [...existing, text]
+      this.queuedPrompts[sessionId] = [
+        ...existing,
+        { text, promptId: result.promptId, queuePosition: result.queuePosition },
+      ]
     },
 
-    // popQueuedPromptFor (Slice E) — remove a queued prompt at the
-    // given index and return its text. Used by the strip's X click to
-    // revert + edit-then-resend (mirrors revertToMessage's edit pattern).
-    popQueuedPromptFor(sessionId: string | null, index: number): string | null {
-      if (!sessionId) return null
-      const existing = this.queuedPrompts[sessionId] ?? []
-      if (index < 0 || index >= existing.length) return null
-      const removed = existing[index]
-      this.queuedPrompts[sessionId] = existing.filter((_, i) => i !== index)
-      return removed
+    // removeQueuedPrompt (backend-owned prompt queue, May 2026) — drop
+    // the named queued entry and clear the transient queued status on its
+    // message (used after cancel and after the turn completes). No-op
+    // when the promptId is unknown.
+    removeQueuedPrompt(sessionId: string, promptId: string): void {
+      const entries = this.queuedPrompts[sessionId] ?? []
+      const next = entries.filter((e) => e.promptId !== promptId)
+      if (next.length !== entries.length) {
+        this.queuedPrompts[sessionId] = next
+      }
+      const msg = this.messages.find((m) => m.promptId === promptId)
+      if (msg && msg.status === 'queued') {
+        delete msg.status
+        delete msg.promptId
+        delete msg.queuePosition
+      }
     },
 
-    // shiftQueuedPromptFor (Slice E) — pop the head of the queue,
-    // returning the prompt or null when empty. Called by the
-    // post-stream-completion auto-submit path inside sendMessage's
-    // finally block.
-    shiftQueuedPromptFor(sessionId: string | null): string | null {
-      if (!sessionId) return null
-      const existing = this.queuedPrompts[sessionId] ?? []
-      if (existing.length === 0) return null
-      const head = existing[0]
-      this.queuedPrompts[sessionId] = existing.slice(1)
-      return head
+    // cancelQueuedPrompt (backend-owned prompt queue, May 2026) — cancel
+    // a queued prompt server-side via DELETE /sessions/{id}/queue/{prompt_id},
+    // then drop the local entry. A 404 (already started / already
+    // cancelled) is treated as idempotent success via
+    // QueuedPromptNotFoundError. Other failures surface on store.error and
+    // leave the entry in place so the user can retry.
+    async cancelQueuedPrompt(sessionId: string, promptId: string): Promise<void> {
+      try {
+        await apiCancelQueuedPrompt(sessionId, promptId)
+      } catch (err) {
+        if (err instanceof QueuedPromptNotFoundError) {
+          // Already gone server-side — nothing left to cancel. Fall
+          // through and drop the local entry.
+        } else {
+          this.error = err instanceof Error ? err.message : 'Failed to cancel queued prompt'
+          return
+        }
+      }
+      this.removeQueuedPrompt(sessionId, promptId)
+    },
+
+    // transitionQueuedToStreaming (backend-owned prompt queue, May 2026)
+    // — called by watchQueuedPrompts when the session's activeTurnId
+    // advances past the turn that was busy when the prompt was queued.
+    // Flips the head queued message to status 'streaming' and raises the
+    // per-session gate so the working indicator + Send/Stop swap engage
+    // (the long-poll attach in pollTurnUntilTerminal takes over next).
+    transitionQueuedToStreaming(sessionId: string): void {
+      const entries = this.queuedPrompts[sessionId] ?? []
+      const head = entries[0]
+      if (head) {
+        const msg = this.messages.find((m) => m.promptId === head.promptId)
+        if (msg && msg.status === 'queued') {
+          msg.status = 'streaming'
+        }
+      }
+      this.setSessionStreaming(sessionId, { isLoading: true, isStreaming: true })
+    },
+
+    // removeQueuedPromptHead (backend-owned prompt queue, May 2026) —
+    // drop the head queued entry once its turn has completed. Clears the
+    // transient 'streaming' status on the message so the canonical
+    // backend row (fetched by the caller's reconcile) wins the render
+    // without a status chip.
+    removeQueuedPromptHead(sessionId: string): void {
+      const entries = this.queuedPrompts[sessionId] ?? []
+      const head = entries[0]
+      if (!head) return
+      this.queuedPrompts[sessionId] = entries.slice(1)
+      const msg = this.messages.find((m) => m.promptId === head.promptId)
+      if (msg && msg.status === 'streaming') {
+        delete msg.status
+        delete msg.promptId
+        delete msg.queuePosition
+      }
+    },
+
+    // markQueuedPromptsSessionEnded (backend-owned prompt queue, May
+    // 2026) — terminal surface for queued prompts that never start: the
+    // session was deleted or the watch budget elapsed without a new turn.
+    // Marks each still-queued message status='session-ended' (a visible
+    // terminal chip, NOT a hang) and empties the queue so the strip
+    // disappears.
+    markQueuedPromptsSessionEnded(sessionId: string): void {
+      const entries = this.queuedPrompts[sessionId] ?? []
+      if (entries.length === 0) return
+      const promptIds = new Set(entries.map((e) => e.promptId))
+      for (const msg of this.messages) {
+        if (msg.promptId && promptIds.has(msg.promptId) && msg.status === 'queued') {
+          msg.status = 'session-ended'
+        }
+      }
+      this.queuedPrompts[sessionId] = []
+    },
+
+    // isQueueFullPaused (backend-owned prompt queue, May 2026) — true
+    // while a 429 queue-full pause is active for the session. The
+    // composer input stays enabled; sendMessage consults this before the
+    // POST and rejects with a surfaced error + restored draft instead of
+    // bouncing silently.
+    isQueueFullPaused(sessionId: string | null): boolean {
+      if (!sessionId) return false
+      return Date.now() < (this.queueFullUntil[sessionId] ?? 0)
+    },
+
+    // clearQueueFullPause (backend-owned prompt queue, May 2026) — drop
+    // the session's 429 pause. Called by tests and by session-scoped
+    // state resets so a stale pause from a deleted/abandoned session
+    // cannot block submits.
+    clearQueueFullPause(sessionId: string | null): void {
+      if (!sessionId) return
+      delete this.queueFullUntil[sessionId]
+    },
+
+    // watchQueuedPrompts (backend-owned prompt queue, May 2026) — the
+    // queued → streaming transition poller. Runs while the session has
+    // queued prompts (bounded by QUEUE_WATCH_MAX_POLLS ×
+    // QUEUE_WATCH_POLL_MS ≈ 60s):
+    //
+    //   1. Seeds the "already handled" turn id from
+    //      lastPollTurnIdBySession (the turn this client is polling, i.e.
+    //      the turn that was busy when the prompt was queued) or, for a
+    //      cross-tab busy turn, from the session summary's activeTurnId.
+    //   2. Polls fetchSessions until activeTurnId advances to a NEW turn —
+    //      that is the queued prompt's turn. transitionQueuedToStreaming
+    //      flips the head message to 'streaming' and pollTurnUntilTerminal
+    //      long-polls it to completion.
+    //   3. After the turn completes, the head entry is dropped, backend
+    //      message ids are adopted, and the loop re-checks the next queued
+    //      prompt (the backend starts queued prompts in FIFO order).
+    //   4. If the session disappears from the list, or the budget elapses
+    //      without a new turn, remaining queued prompts are marked
+    //      session-ended (terminal, not a hang).
+    //
+    // Single watcher per session: the activeQueueWatcherSessions guard
+    // dedups concurrent 202-driven starts so the loop is the sole owner
+    // of the queue drain. Early-returns on session switch (the queue
+    // entry stays; loadSessionMessages re-arms the watcher on return).
+    async watchQueuedPrompts(sessionId: string): Promise<void> {
+      if (!sessionId || activeQueueWatcherSessions.has(sessionId)) return
+      activeQueueWatcherSessions.add(sessionId)
+      try {
+        let handledTurnId = this.lastPollTurnIdBySession[sessionId] ?? ''
+        if (!handledTurnId) {
+          const seed = await fetchSessions()
+          handledTurnId = seed.find((s) => s.id === sessionId)?.activeTurnId ?? ''
+        }
+        for (let poll = 0; poll < QUEUE_WATCH_MAX_POLLS; poll += 1) {
+          if (this.currentSessionId !== sessionId) return
+          const queued = this.queuedPrompts[sessionId] ?? []
+          if (queued.length === 0) return
+          const sessions = await fetchSessions()
+          const summary = sessions.find((s) => s.id === sessionId)
+          if (!summary) {
+            this.markQueuedPromptsSessionEnded(sessionId)
+            return
+          }
+          const activeTurnId = summary.activeTurnId ?? ''
+          if (activeTurnId && activeTurnId !== handledTurnId) {
+            handledTurnId = activeTurnId
+            this.transitionQueuedToStreaming(sessionId)
+            await this.pollTurnUntilTerminal(sessionId, activeTurnId)
+            this.setSessionStreaming(sessionId, { isLoading: false, isStreaming: false })
+            await this.adoptQueuedPromptIds(sessionId)
+            await this.reconcileFromBackend(sessionId)
+            this.applyTurnMetadata()
+            this.removeQueuedPromptHead(sessionId)
+            // Re-loop immediately: the backend may already have started
+            // the next queued prompt; the next fetch picks it up.
+            continue
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WATCH_POLL_MS))
+        }
+        this.markQueuedPromptsSessionEnded(sessionId)
+      } finally {
+        activeQueueWatcherSessions.delete(sessionId)
+      }
+    },
+
+    // adoptQueuedPromptIds (backend-owned prompt queue, May 2026) — after
+    // a queued prompt's turn completes the backend persists the user
+    // message with a canonical id. The optimistic bubble still carries a
+    // temp-* id (there was no POST snapshot to swap it at queue time), so
+    // reconcileFromBackend would preserve it as an orphan next to the
+    // canonical row → duplicate user bubble. This re-fetches the canonical
+    // history and swaps temp-* ids of queued/streaming user messages onto
+    // their matching canonical rows (matched by content, the same rule
+    // sendMessage's id swap uses). reconcileFromBackend then treats the
+    // adopted row as backend-owned and produces zero duplicates.
+    async adoptQueuedPromptIds(sessionId: string): Promise<void> {
+      let backendMessages: Message[]
+      try {
+        backendMessages = await fetchSessionMessages(sessionId)
+      } catch {
+        return
+      }
+      const canonicalUserMessages = backendMessages.filter((m) => m.role === 'user')
+      if (canonicalUserMessages.length === 0) return
+      const presentIds = new Set(this.messages.map((m) => m.id))
+      for (const local of this.messages) {
+        if (
+          local.id.startsWith('temp-') &&
+          (local.status === 'queued' || local.status === 'streaming')
+        ) {
+          const match = canonicalUserMessages.find(
+            (cm) => cm.id && !presentIds.has(cm.id) && cm.content === local.content,
+          )
+          if (match) {
+            local.id = match.id
+            presentIds.add(match.id)
+          }
+        }
+      }
     },
 
     // bootstrap: singleton wrapper around restoreStateFromBackend.
@@ -1797,7 +2059,7 @@ export const useChatStore = defineStore('chat', {
       }
       const removedIds = removed
       this.sessions = this.sessions.filter((s) => !removedIds.has(s.id))
-      // Use Pinia-reactive patches so the QueuedPromptStrip watcher /
+      // Use Pinia-reactive patches so the inline queued-bubble watcher /
       // streaming watchers re-run when their per-session slots disappear.
       // Iterate over the full cascade set so descendant streaming /
       // queuedPrompts / phase slots are dropped too (matching the
@@ -1817,6 +2079,12 @@ export const useChatStore = defineStore('chat', {
       this.sessionStreaming = pruneMap(this.sessionStreaming)
       this.queuedPrompts = pruneMap(this.queuedPrompts)
       this.streamingPhase = pruneMap(this.streamingPhase)
+      // Backend-owned prompt queue (May 2026) — prune the per-session
+      // queue-full pause and last-polled-turn maps alongside the queue
+      // itself so a deleted session cannot leave a stale pause blocking
+      // submits or a stale turn id confusing a future watcher seed.
+      this.queueFullUntil = pruneMap(this.queueFullUntil)
+      this.lastPollTurnIdBySession = pruneMap(this.lastPollTurnIdBySession)
       // UI Parity PR5 (May 2026) — prune per-session token counter
       // state on session delete to match streamingPhase / sessionStreaming
       // pruning above. Without this, a deleted session's last
@@ -2094,6 +2362,15 @@ export const useChatStore = defineStore('chat', {
         // backed activeTurnId is what maybeReattachStream consults via
         // its own this.sessions.find lookup at chatStore.ts:1173.
         this.maybeReattachStream(sessionId, session?.isStreaming ?? false)
+        // Backend-owned prompt queue (May 2026) — re-arm the queued-prompt
+        // watcher on session load. watchQueuedPrompts early-returns when
+        // the user navigates away mid-watch, leaving the queue entry for
+        // when they return; without this re-arm the entry would linger
+        // with no poller to drain it. Singleton guard makes this a no-op
+        // when a watcher is already running for the session.
+        if ((this.queuedPrompts[sessionId]?.length ?? 0) > 0) {
+          void this.watchQueuedPrompts(sessionId)
+        }
       } finally {
         // Per-session state — clear isLoading on the target session
         // (the message-history fetch is done). DO NOT clear isStreaming:
@@ -2417,6 +2694,12 @@ export const useChatStore = defineStore('chat', {
      *     via r.Context().Done().
      */
     async pollTurnUntilTerminal(sessionId: string, turnId: string): Promise<void> {
+      // Backend-owned prompt queue (May 2026) — record the turn this
+      // client is polling so watchQueuedPrompts can seed its "already
+      // handled" turn id and wait for the NEXT new activeTurnId. Without
+      // this the watcher would mistake the busy turn (the one that caused
+      // the 202) for the queued prompt's turn.
+      this.lastPollTurnIdBySession[sessionId] = turnId
       // Legacy-fallback cadence — only used when the long-poll path is
       // detected as unsupported (see useLongPoll gate below).
       const POLL_INTERVAL_FAST_MS = 250
@@ -3261,31 +3544,15 @@ export const useChatStore = defineStore('chat', {
         await this.compactCurrentSession()
         return
       }
-      // Pre-fix this branch silently early-returned when isLoading was true.
-      // Combined with a stuck stream (no [DONE] from the backend), the user
-      // saw the chat appear frozen with no surfacing of any kind. The gate
-      // now sets this.error so the existing chat-error footer renders the
-      // rejection. The MessageInput component additionally surfaces a toast
-      // — the two surface independently because non-input call sites
-      // (e.g. programmatic resends) still need a visible signal.
-      //
-      // Per-session state (Slice A) — read the gate from the active
-      // session's slot, NOT the flat legacy field. Pre-slice the flat
-      // gate bounced session B's send while session A was streaming;
-      // now session B's gate is independent. Fall back to the flat
-      // field when no current session exists (lazy-create branch
-      // hasn't run yet) — that's the legacy-shape contract for the
-      // pre-session-create gate.
-      const gateState = this.currentSessionId
-        ? this.streamingFor(this.currentSessionId)
-        : { isLoading: this.isLoading, isStreaming: this.isStreaming }
-      if (gateState.isLoading) {
-        // Streaming Coherence Slice E (May 2026) — queued prompts.
-        // Submit-while-streaming pushes onto the session's queue
-        // instead of bouncing the prompt with a toast. The send
-        // finally block auto-submits the queue head when the outer
-        // turn completes.
-        this.queuePromptFor(this.currentSessionId, text)
+      // Backend-owned prompt queue (May 2026) — a 429 queue-full response
+      // pauses submissions for a short window WITHOUT disabling the
+      // composer input. Check the pause before POSTing so the second
+      // submit in the pause window never reaches the network. The draft
+      // is restored to the composer (via composerText) so the user does
+      // not lose their text; the error footer explains why.
+      if (this.isQueueFullPaused(this.currentSessionId)) {
+        this.composerText = text
+        this.error = 'Queue is full — submissions are paused for a moment. Please retry shortly.'
         return
       }
 
@@ -3318,6 +3585,10 @@ export const useChatStore = defineStore('chat', {
       // single canonical target for both flag-clear and queued-prompt
       // drain.
       let targetedSessionId: string | null = initialSessionId
+      // Backend-owned prompt queue (May 2026) — true when the POST took
+      // the 202 QUEUED PATH. The busy turn owns the session's streaming
+      // gate, so the finally block skips its flag-clear for this send.
+      let wasQueued = false
 
       // Optimistic id is `temp-${Date.now()}-${rand}` rather than just
       // `temp-${Date.now()}` so concurrent sends within the same millisecond
@@ -3393,6 +3664,21 @@ export const useChatStore = defineStore('chat', {
           attachmentIds.length > 0
             ? await sendSessionMessage(sessionId, text, { attachmentIds })
             : await sendSessionMessage(sessionId, text)
+
+        // Backend-owned prompt queue (May 2026) — the 202 QUEUED PATH.
+        // The session is busy; the backend accepted this prompt into its
+        // per-session queue instead of minting a turn. Stamp the queued
+        // discriminant onto the optimistic bubble, mirror the entry into
+        // queuedPrompts (the strip), and hand the queued → streaming
+        // transition to watchQueuedPrompts. This send does NOT own the
+        // session's streaming gate (the busy turn does), so the finally
+        // block must skip its flag-clear — flagged via `wasQueued`.
+        if (sentResult.queued) {
+          wasQueued = true
+          this.markPromptQueued(capturedSessionId, optimisticMessage.id, text, sentResult)
+          void this.watchQueuedPrompts(capturedSessionId)
+          return
+        }
 
         // Defensive unwrap. The api function returns
         // { turnId: string | null, snapshot: Session }. Pre-Phase-3
@@ -3474,6 +3760,24 @@ export const useChatStore = defineStore('chat', {
 
         await this.loadSessions()
       } catch (error) {
+        if (error instanceof QueueFullError) {
+          // Backend-owned prompt queue (May 2026) — HTTP 429 queue-full.
+          // Pause submissions for a short window WITHOUT disabling the
+          // composer input. Restore the draft to the composer so the user
+          // does not lose their text, surface the reason on the error
+          // footer, and mark the optimistic bubble failed. The session's
+          // streaming gate is cleared by the finally block (this send
+          // owned it — the POST never minted a turn).
+          this.queueFullUntil[targetedSessionId ?? initialSessionId ?? ''] =
+            Date.now() + QUEUE_FULL_PAUSE_MS
+          this.composerText = text
+          this.error = 'Queue is full — submissions are paused for a moment. Please retry shortly.'
+          const local = this.messages.find((m) => m.id === optimisticMessage.id)
+          if (local) {
+            local.status = 'failed'
+          }
+          return
+        }
         this.error = error instanceof Error ? error.message : 'Failed to send message'
         // Mark the optimistic bubble as failed so the user sees their
         // attempt didn't go through (compounding bug C-2). The bubble stays
@@ -3503,34 +3807,22 @@ export const useChatStore = defineStore('chat', {
         // wrong session's flags. The captured id is the canonical
         // recipient of the send and the canonical owner of the cleanup.
         const completedSessionId = targetedSessionId ?? initialSessionId
-        this.setSessionStreaming(completedSessionId, { isLoading: false, isStreaming: false })
-        // Streaming Coherence Slice E (May 2026) — queued-prompt drain.
-        // After the outer turn completes, fire the next queued prompt
-        // for THIS session (not the active session — the user may have
-        // navigated). The recursion is bounded: each queued prompt
-        // either succeeds (drain continues) or fails (queue retains
-        // remaining prompts; user can retry). Microtask-scheduled so
-        // the finally block resolves before the next send begins —
-        // observers of the streaming flag transition see false before
-        // it goes back to true.
-        if (completedSessionId) {
-          const nextPrompt = this.shiftQueuedPromptFor(completedSessionId)
-          if (nextPrompt !== null) {
-            void Promise.resolve().then(() => {
-              // Re-check the session is still active before firing — a
-              // mid-flight session deletion or navigation can leave the
-              // queue stranded; the user picking the session up again
-              // can re-trigger the drain.
-              if (this.currentSessionId === completedSessionId) {
-                void this.sendMessage(nextPrompt)
-              } else {
-                // Restore the prompt to the head of the queue so it is
-                // not lost on background-session drain.
-                const remaining = this.queuedPrompts[completedSessionId] ?? []
-                this.queuedPrompts[completedSessionId] = [nextPrompt, ...remaining]
-              }
-            })
-          }
+        // Backend-owned prompt queue (May 2026) — the 202 QUEUED PATH does
+        // NOT own the session's streaming gate (the busy turn does), so its
+        // finally must not clear flags the busy turn is still using. The
+        // watcher clears the gate when the queued prompt's turn completes.
+        if (!wasQueued) {
+          this.setSessionStreaming(completedSessionId, { isLoading: false, isStreaming: false })
+        }
+        // Backend-owned prompt queue (May 2026) — defensive watcher re-arm.
+        // The busy turn just completed and this send owned the gate, so the
+        // backend has (or is about to have) a new activeTurnId for the next
+        // queued prompt. watchQueuedPrompts is a singleton per session (the
+        // activeQueueWatcherSessions guard) so this is a no-op when a
+        // watcher already ran from the 202 path — it only covers the
+        // cross-tab / late-202 ordering where the watcher was never armed.
+        if (completedSessionId && (this.queuedPrompts[completedSessionId]?.length ?? 0) > 0) {
+          void this.watchQueuedPrompts(completedSessionId)
         }
       }
     },

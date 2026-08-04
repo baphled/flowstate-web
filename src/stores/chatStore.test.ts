@@ -22,6 +22,7 @@ function installLocalStorageStub(): void {
 }
 import {
   compactSessionNow,
+  cancelQueuedPrompt,
   createSession,
   deleteSession,
   fetchAgents,
@@ -31,6 +32,8 @@ import {
   fetchSwarms,
   fetchTurn,
   grantPermission,
+  QueueFullError,
+  QueuedPromptNotFoundError,
   sendSessionMessage,
   subscribeSessionStream,
   truncateSessionMessages,
@@ -41,6 +44,7 @@ import {
 import {
   DEFAULT_AGENT_ID,
   TOOL_ACTIVITY_DISMISS_MS,
+  __resetQueueWatchers,
   __resetSessionStreams,
   composeToolActivityMessage,
   describeToolName,
@@ -192,6 +196,30 @@ vi.mock('../api', () => ({
     error: '',
     messages: [],
   })),
+  // Backend-owned prompt queue (May 2026) — DELETE
+  // /sessions/{sid}/queue/{prompt_id} seam for the inline queued-bubble
+  // cancel control. Default mock resolves with status cancelled; tests
+  // override with mockRejectedValueOnce(new QueuedPromptNotFoundError(...))
+  // for the idempotent-404 branch.
+  cancelQueuedPrompt: vi.fn((_sessionId: string, _promptId: string) =>
+    Promise.resolve({ status: 'cancelled' }),
+  ),
+  // Backend-owned prompt queue (May 2026) — typed errors the store
+  // branches on with instanceof. Must be real classes (not plain
+  // objects) so `err instanceof QueueFullError` matches in tests that
+  // reject the sendSessionMessage mock with these.
+  QueueFullError: class QueueFullError extends Error {
+    constructor(message?: string) {
+      super(message)
+      this.name = 'QueueFullError'
+    }
+  },
+  QueuedPromptNotFoundError: class QueuedPromptNotFoundError extends Error {
+    constructor(message?: string) {
+      super(message)
+      this.name = 'QueuedPromptNotFoundError'
+    }
+  },
 }))
 
 // Toast composable is a module singleton — without a global teardown the
@@ -205,6 +233,10 @@ afterEach(() => {
   // Per-session SSE singletons (Slice B) — module-scoped Map persists
   // between tests; reset so a stream from test A does not leak into B.
   __resetSessionStreams()
+  // Backend-owned prompt queue (May 2026) — the activeQueueWatcherSessions
+  // guard Set is module-scoped; reset so a watcher parked on a session in
+  // one test cannot block a later test that watches the same session id.
+  __resetQueueWatchers()
 })
 
 describe('chatStore - restoreStateFromBackend', () => {
@@ -3517,21 +3549,155 @@ describe('chatStore - sendMessage surfacing when isLoading is already true (sile
   // existing chat-error footer renders, AND a toast fires for an in-front
   // surfacing the user cannot miss.
 
-  it('queues the prompt instead of bouncing when isLoading is already true (Slice E — queued prompts)', async () => {
-    // Streaming Coherence Slice E (May 2026) — pre-slice this gate
-    // bounced the prompt with `store.error = "in flight..."`. The new
-    // contract: silently push onto the session's queue; the strip
-    // shows the pending pill and the auto-drain fires it on outer
-    // turn completion.
+  it('queues the prompt via the backend 202 path when a turn is already busy (backend-owned prompt queue)', async () => {
+    // Backend-owned prompt queue (May 2026) — supersedes the client-side
+    // Slice E queue. Submit-while-streaming POSTs like any other prompt;
+    // the backend replies 202 {status:"queued", session_id, queuePosition,
+    // promptId} instead of minting a turn. The store stamps the queued
+    // discriminant onto the optimistic bubble and mirrors the entry into
+    // queuedPrompts (the strip), handing the queued → streaming transition
+    // to watchQueuedPrompts.
     const store = useChatStore()
     store.currentSessionId = 'sess-q'
     store.setSessionStreaming('sess-q', { isLoading: true })
+    vi.mocked(sendSessionMessage).mockResolvedValueOnce({
+      queued: true,
+      sessionId: 'sess-q',
+      promptId: 'prompt-abc',
+      queuePosition: 2,
+    })
+    // Keep the fire-and-forget watchQueuedPrompts watcher parked: it
+    // polls fetchSessions for a NEW activeTurnId, so return a session
+    // row for 'sess-q' with an empty activeTurnId (no transition fires,
+    // no session-ended marking) and let it idle on its poll timer.
+    vi.mocked(fetchSessions).mockResolvedValue([
+      {
+        id: 'sess-q',
+        agentId: 'agent-1',
+        title: 'Session Q',
+        createdAt: '',
+        updatedAt: '',
+        messageCount: 0,
+        status: 'active',
+        depth: 0,
+        isStreaming: true,
+        activeTurnId: '',
+      },
+    ])
 
     await store.sendMessage('continue')
 
     expect(store.error).toBeNull()
-    expect(store.queuedPrompts['sess-q']).toEqual(['continue'])
+    expect(vi.mocked(sendSessionMessage)).toHaveBeenCalledWith('sess-q', 'continue')
+    // The optimistic bubble carries the queued discriminant + backend ids.
+    const userMsg = store.messages.find((m) => m.role === 'user' && m.content === 'continue')
+    expect(userMsg?.status).toBe('queued')
+    expect(userMsg?.promptId).toBe('prompt-abc')
+    expect(userMsg?.queuePosition).toBe(2)
+    // The strip entry mirrors the backend queue position.
+    expect(store.queuedPrompts['sess-q']).toEqual([
+      { text: 'continue', promptId: 'prompt-abc', queuePosition: 2 },
+    ])
+  })
+})
+
+describe('chatStore - backend-owned prompt queue: 429 pause + cancel', () => {
+  beforeEach(() => {
+    installLocalStorageStub()
+    vi.clearAllMocks()
+    setActivePinia(createPinia())
+  })
+
+  it('pauses submissions for a window on 429 queue-full without disabling the input', async () => {
+    // Backend-owned prompt queue (May 2026) — HTTP 429 queue-full. The
+    // composer input stays ENABLED; the pause is enforced inside
+    // sendMessage which rejects with a surfaced error + restored draft
+    // instead of bouncing silently.
+    const store = useChatStore()
+    store.currentSessionId = 'sess-429'
+    vi.mocked(sendSessionMessage).mockRejectedValueOnce(new QueueFullError())
+
+    await store.sendMessage('hello')
+
+    // The pause window is armed for the session...
+    expect(store.isQueueFullPaused('sess-429')).toBe(true)
+    // ...the draft is restored to the composer so the user does not lose
+    // their text, the error footer explains the pause, and the optimistic
+    // bubble is marked failed.
+    expect(store.composerText).toBe('hello')
+    expect(store.error).toMatch(/queue is full/i)
+    const userMsg = store.messages.find((m) => m.role === 'user' && m.content === 'hello')
+    expect(userMsg?.status).toBe('failed')
+
+    // A second submit within the pause window is blocked WITHOUT reaching
+    // the network — the pause is a submission gate, not an input disable.
+    vi.mocked(sendSessionMessage).mockClear()
+    await store.sendMessage('hello again')
     expect(vi.mocked(sendSessionMessage)).not.toHaveBeenCalled()
+    expect(store.composerText).toBe('hello again')
+  })
+
+  it('drops the local queued entry when cancel succeeds (204)', async () => {
+    const store = useChatStore()
+    store.currentSessionId = 'sess-c'
+    store.queuedPrompts['sess-c'] = [
+      { text: 'pending', promptId: 'prompt-1', queuePosition: 1 },
+    ]
+    store.messages = [
+      { id: 'm1', role: 'user', content: 'pending', timestamp: '', status: 'queued', promptId: 'prompt-1', queuePosition: 1 },
+    ]
+    vi.mocked(cancelQueuedPrompt).mockResolvedValueOnce({ status: 'cancelled' })
+
+    await store.cancelQueuedPrompt('sess-c', 'prompt-1')
+
+    expect(vi.mocked(cancelQueuedPrompt)).toHaveBeenCalledWith('sess-c', 'prompt-1')
+    expect(store.queuedPrompts['sess-c']).toEqual([])
+    const msg = store.messages.find((m) => m.id === 'm1')
+    expect(msg?.status).toBeUndefined()
+    expect(msg?.promptId).toBeUndefined()
+    expect(msg?.queuePosition).toBeUndefined()
+    expect(store.error).toBeNull()
+  })
+
+  it('treats a 404 cancel as idempotent success and drops the local entry', async () => {
+    // QueuedPromptNotFoundError (already running / already cancelled /
+    // never-valid id) is treated as idempotent success: there is nothing
+    // left to cancel, so the local queue entry is dropped without
+    // surfacing an error.
+    const store = useChatStore()
+    store.currentSessionId = 'sess-c'
+    store.queuedPrompts['sess-c'] = [
+      { text: 'pending', promptId: 'prompt-ghost', queuePosition: 3 },
+    ]
+    vi.mocked(cancelQueuedPrompt).mockRejectedValueOnce(new QueuedPromptNotFoundError())
+
+    await store.cancelQueuedPrompt('sess-c', 'prompt-ghost')
+
+    expect(store.queuedPrompts['sess-c']).toEqual([])
+    expect(store.error).toBeNull()
+  })
+
+  it('marks the head queued prompt as streaming when the backend turn starts', () => {
+    const store = useChatStore()
+    store.currentSessionId = 'sess-c'
+    store.queuedPrompts['sess-c'] = [
+      { text: 'pending', promptId: 'prompt-1', queuePosition: 1 },
+    ]
+    store.messages = [
+      { id: 'm1', role: 'user', content: 'pending', timestamp: '', status: 'queued', promptId: 'prompt-1', queuePosition: 1 },
+    ]
+
+    store.transitionQueuedToStreaming('sess-c')
+
+    expect(store.messages[0].status).toBe('streaming')
+    expect(store.messages[0].promptId).toBe('prompt-1')
+    expect(store.messages[0].queuePosition).toBe(1)
+    expect(store.queuedPrompts['sess-c']).toEqual([
+      { text: 'pending', promptId: 'prompt-1', queuePosition: 1 },
+    ])
+    expect(store.sessionStreaming['sess-c']).toEqual({ isLoading: true, isStreaming: true })
+    expect(store.isLoading).toBe(true)
+    expect(store.isStreaming).toBe(true)
   })
 })
 
@@ -9161,7 +9327,7 @@ describe('chatStore.deleteSession', () => {
       'session-B': { isLoading: false, isStreaming: true },
     }
     store.queuedPrompts = {
-      'session-B': ['queued-1'],
+      'session-B': [{ text: 'queued-1', promptId: 'prompt-1', queuePosition: 1 }],
     }
     store.streamingPhase = {
       'session-B': 'generating',
@@ -9219,7 +9385,7 @@ describe('chatStore.deleteSession', () => {
       'child-1': { isLoading: false, isStreaming: true },
       'sibling': { isLoading: false, isStreaming: false },
     }
-    store.queuedPrompts = { 'child-1': ['queued-c1'] }
+    store.queuedPrompts = { 'child-1': [{ text: 'queued-c1', promptId: 'prompt-c1', queuePosition: 1 }] }
     store.streamingPhase = { 'child-1': 'generating' }
 
     await store.deleteSession('root')
