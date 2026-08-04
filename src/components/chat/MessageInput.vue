@@ -292,9 +292,10 @@ async function submit(): Promise<void> {
   // Streaming Coherence Slice E (May 2026) — queued prompts. The
   // composer no longer bounces submit-while-streaming with a toast;
   // it forwards the prompt to sendMessage which routes it to the
-  // session's queue. The QueuedPromptStrip renders the queued
-  // entries between the thread and the composer; clicking X reverts
-  // a prompt into the composer for edit-then-resend.
+  // session's queue. Queued prompts render INLINE in the chat thread
+  // as distinct user bubbles (MessageBubble's message-bubble--queued
+  // chrome) with a per-message cancel control; the composer stays
+  // enabled while prompts are queued.
   //
   // Chat Attachments Backend PR1 (May 2026) — upload BEFORE sending so
   // the prompt arrives with attachment references already resolved.
@@ -329,6 +330,19 @@ async function submit(): Promise<void> {
     await store.sendMessage(text, { attachmentIds: uploadedIds })
   } else {
     await store.sendMessage(text)
+  }
+  // Backend-owned prompt queue (May 2026) — HTTP 429 queue-full pause.
+  // sendMessage arms the per-session pause and restores the draft to the
+  // composer via composerText; surface a toast so the user knows the
+  // submit did not go through. The composer input itself stays ENABLED —
+  // the pause only gates the next send until the window expires.
+  if (store.isQueueFullPaused(store.currentSessionId)) {
+    showToast({
+      title: 'Queue full',
+      message: 'The session queue is full — submissions are paused for a moment. Your message was kept in the composer.',
+      variant: 'error',
+      duration: 5000,
+    })
   }
 }
 

@@ -221,8 +221,8 @@ describe('MessageInput slash and mention triggers', () => {
     // Streaming Coherence Slice E (May 2026) — pre-slice the composer
     // bounced submit-while-streaming with a toast. The new contract:
     // forward to store.sendMessage which routes the prompt onto the
-    // session's queue. The QueuedPromptStrip surfaces the queued
-    // pills below the thread; no toast fires.
+    // session's queue. Queued prompts render inline in the thread as
+    // distinct user bubbles; no toast fires.
     const store = useChatStore()
     vi.spyOn(store, 'loadAgents').mockResolvedValue()
     const sendSpy = vi.spyOn(store, 'sendMessage').mockResolvedValue()
@@ -763,6 +763,35 @@ describe('MessageInput — stop button (B5)', () => {
 
     expect(wrapper.find('[data-testid="send-button"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="stop-button"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('shows the queue-full toast after submit while leaving the input enabled', async () => {
+    const store = useChatStore()
+    vi.spyOn(store, 'loadAgents').mockResolvedValue()
+    store.currentSessionId = 'session-queue'
+    const sendSpy = vi.spyOn(store, 'sendMessage').mockResolvedValue()
+    vi.spyOn(store, 'isQueueFullPaused').mockReturnValue(true)
+
+    const { useToast } = await import('@/composables/useToast')
+    const { toasts, dismissAll } = useToast()
+    dismissAll()
+
+    const wrapper = mount(MessageInput, { attachTo: document.body })
+    await flushPromises()
+
+    const inputWrapper = wrapper.get('[data-testid="message-input"]')
+    expect((inputWrapper.element as HTMLTextAreaElement).disabled).toBe(false)
+    await typeInto(inputWrapper, 'queued send', 11)
+    await inputWrapper.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(sendSpy).toHaveBeenCalledWith('queued send')
+    const toast = toasts.value.find((t) => t.title === 'Queue full')
+    expect(toast?.message).toContain('paused')
+    expect((wrapper.get('[data-testid="message-input"]').element as HTMLTextAreaElement).disabled).toBe(false)
+
+    dismissAll()
     wrapper.unmount()
   })
 })
