@@ -1,15 +1,17 @@
 import BashTool from '@/components/tools/BashTool.vue'
+import CompactStatusTool from '@/components/tools/CompactStatusTool.vue'
 import EditTool from '@/components/tools/EditTool.vue'
 import GenericTool from '@/components/tools/GenericTool.vue'
 import GlobTool from '@/components/tools/GlobTool.vue'
 import GrepTool from '@/components/tools/GrepTool.vue'
 import ReadTool from '@/components/tools/ReadTool.vue'
-import RecallSearchTool from '@/components/tools/RecallSearchTool.vue'
+import SkillLoadTool from '@/components/tools/SkillLoadTool.vue'
 import TodoTool from '@/components/tools/TodoTool.vue'
 import WriteTool from '@/components/tools/WriteTool.vue'
+import { type Component } from 'vue'
 import { getToolComponent, registerTool } from './toolRegistry'
 
-function registerIfNeeded(name: string, component: typeof BashTool): void {
+function registerIfNeeded(name: string, component: Component): void {
   if (getToolComponent(name) === component) {
     return
   }
@@ -27,13 +29,13 @@ export function registerTools(): void {
   registerIfNeeded('glob', GlobTool)
   registerIfNeeded('list', GlobTool)
   registerIfNeeded('grep', GrepTool)
-  registerIfNeeded('skill_load', GenericTool)
-  registerIfNeeded('webfetch', GenericTool)
-  registerIfNeeded('websearch', GenericTool)
+  registerIfNeeded('skill_load', SkillLoadTool)
+  registerIfNeeded('webfetch', CompactStatusTool)
+  registerIfNeeded('websearch', CompactStatusTool)
   registerIfNeeded('task', GenericTool)
-  // Todo + recall renderers — see TodoTool.vue / RecallSearchTool.vue for
-  // the per-tool rendering rules. Recall tool names map to the Go side at
-  // internal/recall/query_tools.go (search_context, get_messages,
+  // Todo + compact-status renderers — see TodoTool.vue / CompactStatusTool.vue
+  // for the per-tool rendering rules. Compact-status tool names map to the
+  // Go side at internal/recall/query_tools.go (search_context, get_messages,
   // summarize_context) and internal/tool/recall/ (chain_search_context,
   // chain_get_messages).
   registerIfNeeded('todowrite', TodoTool)
@@ -47,9 +49,10 @@ export function registerTools(): void {
   // fallback, surfacing raw call args + JSON output instead of the
   // checkbox card the user expects.
   registerIfNeeded('todo_update', TodoTool)
-  registerIfNeeded('search_context', RecallSearchTool)
-  registerIfNeeded('chain_search_context', RecallSearchTool)
-  registerIfNeeded('get_messages', RecallSearchTool)
-  registerIfNeeded('chain_get_messages', RecallSearchTool)
-  registerIfNeeded('summarize_context', GenericTool)
+  registerIfNeeded('search_context', CompactStatusTool)
+  registerIfNeeded('chain_search_context', CompactStatusTool)
+  registerIfNeeded('get_messages', CompactStatusTool)
+  registerIfNeeded('chain_get_messages', CompactStatusTool)
+  registerIfNeeded('summarize_context', CompactStatusTool)
+  registerIfNeeded('coordination_store', CompactStatusTool)
 }

@@ -101,11 +101,6 @@ describe("MessageBubble — single card chrome per tool call", () => {
         { content: "two", status: "completed", priority: "low" },
       ]),
     },
-    {
-      tool: "search_context",
-      toolInput: JSON.stringify({ query: "find me" }),
-      body: "user: hit one\n---\nassistant: hit two",
-    },
   ];
 
   for (const { tool, toolInput, body } of cases) {
@@ -119,6 +114,60 @@ describe("MessageBubble — single card chrome per tool call", () => {
       // the scoped styles). Two layers is the bug; one is the contract.
       const bubbles = wrapper.findAll(".tool-bubble");
       expect(bubbles).toHaveLength(1);
+    });
+  }
+});
+
+describe("MessageBubble — compact-status tools render inline without card chrome", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    registerTools();
+    vi.mocked(useChatStore).mockReturnValue({
+      loadSessionByAgentId: vi.fn(),
+      loadSessionForDelegation: vi.fn(),
+    } as never);
+  });
+
+  const compactCases: Array<{
+    tool: string;
+    toolInput?: string;
+    body: string;
+  }> = [
+    {
+      tool: "webfetch",
+      toolInput: JSON.stringify({ url: "https://example.com" }),
+      body: "Fetched body",
+    },
+    {
+      tool: "websearch",
+      toolInput: JSON.stringify({ query: "test query" }),
+      body: "Results",
+    },
+    {
+      tool: "search_context",
+      toolInput: JSON.stringify({ query: "find me" }),
+      body: "user: hit one\n---\nassistant: hit two",
+    },
+    {
+      tool: "summarize_context",
+      body: "Summary text",
+    },
+    { tool: "coordination_store", body: "Stored" },
+  ];
+
+  for (const { tool, toolInput, body } of compactCases) {
+    it(`renders zero ToolBubble card layers for ${tool} (compact-status renderer)`, () => {
+      const wrapper = mountWithRealTools(
+        makeMessage({ toolName: tool, toolInput, content: body }),
+      );
+
+      const bubbles = wrapper.findAll(".tool-bubble");
+      expect(bubbles).toHaveLength(0);
+
+      // The compact renderer should be present in the DOM.
+      expect(
+        wrapper.find('[data-testid="compact-status-tool"]').exists(),
+      ).toBe(true);
     });
   }
 });

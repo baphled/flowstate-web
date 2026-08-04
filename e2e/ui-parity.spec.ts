@@ -998,15 +998,11 @@ test.describe("Tier-3 polish — PR6", () => {
     );
   });
 
-  // [16] RecallSearchTool — `[time=ISO]` and `[depth=N]` prefixes produce
-  // relative timestamp + chain-depth chip. We use a fixed clock so the
-  // relative format doesn't drift.
-  test("Recall results render relative timestamp + chain-depth chip", async ({
+  // [16] CompactStatusTool — search_context renders as a compact inline
+  // label with a status glyph (⟳ while running, ✓ after completion).
+  test("Compact-status tools render label with status glyph", async ({
     page,
   }) => {
-    // Pin a fixed Date.now() so "Nh ago" math is deterministic regardless
-    // of CI clock skew. Anchor: 2026-05-12T10:00:00Z. Result timestamp
-    // 2026-05-12T08:00:00Z → 2h ago.
     await page.addInitScript(() => {
       const fixed = new Date("2026-05-12T10:00:00Z").getTime();
       const RealDate = Date;
@@ -1038,10 +1034,7 @@ test.describe("Tier-3 polish — PR6", () => {
     await waitForSSE(page);
 
     // Drive via SSE so registerTools() has populated the registry and
-    // the chatStore routes search_context to RecallSearchTool (not the
-    // GenericTool fallback). The engine emits tool_call + tool_result
-    // separately — the call event creates the running tool_result row,
-    // the result event fills its content.
+    // the chatStore routes search_context to CompactStatusTool.
     await fireSSE(page, "message", {
       type: "tool_call",
       name: "search_context",
@@ -1052,17 +1045,59 @@ test.describe("Tier-3 polish — PR6", () => {
       content: recallBody,
     });
 
-    const card = page
-      .locator('[data-testid="tool-renderer"][data-tool="search_context"]')
-      .first();
-    await expect(card).toBeVisible({ timeout: 10_000 });
-    if ((await card.getAttribute("data-open")) === "false") {
-      await card.locator(".tool-bubble__trigger").click();
-    }
-    const result = page.getByTestId("recall-result").first();
-    await expect(result).toBeVisible({ timeout: 5_000 });
-    await expect(result.getByTestId("recall-timestamp")).toContainText("h ago");
-    await expect(result.getByTestId("recall-chain-depth")).toBeVisible();
+    // The compact renderer is inside the tool-invocation wrapper; locate
+    // the compact-status-tool element by its testid.
+    const compact = page.getByTestId("compact-status-tool").first();
+    await expect(compact).toBeVisible({ timeout: 10_000 });
+
+    // After completion the glyph should be ✓.
+    const glyph = compact.getByTestId("compact-status-glyph");
+    await expect(glyph).toContainText("✓");
+
+    gate.release();
+  });
+
+  // [16b] CompactStatusTool error path — when the SSE tool_error event
+  // flips the status to 'error', the inline compact row disappears and
+  // a toast notification surfaces the failure instead.
+  test("Compact-status tool failure surfaces as a toast and hides inline row", async ({
+    page,
+  }) => {
+    const gate = newGate();
+    await installCommonRoutes(page, { postGate: gate });
+    await page.goto("/chat");
+    await page
+      .getByTestId("message-input")
+      .fill("search something broken");
+    await page.getByTestId("send-button").click();
+    await waitForSSE(page);
+
+    // Fire tool_call to create the running compact row.
+    await fireSSE(page, "message", {
+      type: "tool_call",
+      name: "search_context",
+      status: "running",
+    });
+
+    // Compact row is visible while running.
+    const compact = page.getByTestId("compact-status-tool").first();
+    await expect(compact).toBeVisible({ timeout: 10_000 });
+
+    // Fire tool_error — handleToolErrorEvent sets status='error'.
+    // CompactStatusTool's watch fires showToast and the template's
+    // v-if hides the inline row.
+    await fireSSE(page, "message", {
+      type: "tool_error",
+      content: "Error: search_context backend unavailable",
+    });
+
+    // Inline row is gone.
+    await expect(page.getByTestId("compact-status-tool")).toHaveCount(0);
+
+    // A toast surfaces the failure.
+    const toast = page.getByTestId("toast-item").first();
+    await expect(toast).toBeVisible({ timeout: 5_000 });
+    await expect(toast).toContainText("search_context");
 
     gate.release();
   });
