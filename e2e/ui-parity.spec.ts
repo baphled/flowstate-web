@@ -1005,21 +1005,7 @@ test.describe("Tier-3 polish — PR6", () => {
   }) => {
     await page.addInitScript(() => {
       const fixed = new Date("2026-05-12T10:00:00Z").getTime();
-      const RealDate = Date;
-      class FixedDate extends RealDate {
-        constructor(...args: ConstructorParameters<typeof Date>) {
-          if (args.length === 0) {
-            super(fixed);
-          } else {
-            super(...(args as []));
-          }
-        }
-        static now() {
-          return fixed;
-        }
-      }
-      (window as unknown as { Date: typeof Date }).Date =
-        FixedDate as unknown as typeof Date;
+      Date.now = () => fixed;
     });
 
     const recallBody =
