@@ -17,6 +17,11 @@ const ToolBubble = {
   `,
 };
 
+const HighlightedCode = {
+  props: ["code", "lang", "maxHeight"],
+  template: '<pre data-component="highlighted-code" :data-lang="lang"><code>{{ code }}</code></pre>',
+};
+
 describe("WriteTool", () => {
   // I4: Write content IS the value of the card — the user needs to see
   // what was written to verify the change. Open by default.
@@ -28,7 +33,7 @@ describe("WriteTool", () => {
         body: "hi",
         status: "completed",
       },
-      global: { stubs: { CopyButton, ToolBubble } },
+      global: { stubs: { CopyButton, HighlightedCode, ToolBubble } },
     });
     expect(
       wrapper
@@ -47,6 +52,7 @@ describe("WriteTool", () => {
       global: {
         stubs: {
           CopyButton,
+          HighlightedCode,
           ToolBubble,
         },
       },
@@ -65,5 +71,98 @@ describe("WriteTool", () => {
       "saved content",
     );
     expect(wrapper.find('[data-testid="copy-btn"]').exists()).toBe(true);
+  });
+
+  it("renders written content as a new-file diff with + prefix, gutters and line numbers", () => {
+    const wrapper = mount(WriteTool, {
+      props: {
+        toolName: "write",
+        heading: "/tmp/new.ts",
+        body: "line one\nline two\nline three",
+        status: "completed",
+      },
+      global: {
+        stubs: {
+          CopyButton,
+          HighlightedCode,
+          ToolBubble,
+        },
+      },
+    });
+
+    const lines = wrapper.findAll('[data-testid="write-line"]');
+    expect(lines).toHaveLength(3);
+    expect(lines[0].attributes("data-line-number")).toBe("1");
+    expect(lines[2].attributes("data-line-number")).toBe("3");
+    expect(lines[0].text()).toContain("+");
+    expect(lines[0].text()).toContain("line one");
+    expect(lines[2].text()).toContain("line three");
+  });
+
+  it("shows a summary with the written line count and file path", () => {
+    const wrapper = mount(WriteTool, {
+      props: {
+        toolName: "write",
+        heading: "/tmp/new.ts",
+        body: "a\nb\nc\nd",
+        status: "completed",
+      },
+      global: {
+        stubs: {
+          CopyButton,
+          HighlightedCode,
+          ToolBubble,
+        },
+      },
+    });
+
+    const summary = wrapper.get('[data-testid="write-summary"]');
+    expect(summary.text()).toContain("+4 lines written to /tmp/new.ts");
+  });
+
+  it("shows a new file badge and resolves the path from toolInput when present", () => {
+    const wrapper = mount(WriteTool, {
+      props: {
+        toolName: "write",
+        heading: "write /tmp/new.ts",
+        body: "a\nb\nc\nd",
+        status: "completed",
+        toolInput: JSON.stringify({ filePath: "/tmp/new.ts", exists: false }),
+      },
+      global: {
+        stubs: {
+          CopyButton,
+          HighlightedCode,
+          ToolBubble,
+        },
+      },
+    });
+
+    const summary = wrapper.get('[data-testid="write-summary"]');
+    expect(summary.text()).toContain("/tmp/new.ts");
+    expect(summary.text()).toContain("new file");
+  });
+
+  it("falls back to the plain pre when the body has fewer than 3 lines", () => {
+    const wrapper = mount(WriteTool, {
+      props: {
+        toolName: "write",
+        heading: "/tmp/tiny.ts",
+        body: "hi",
+        status: "completed",
+      },
+      global: {
+        stubs: {
+          CopyButton,
+          HighlightedCode,
+          ToolBubble,
+        },
+      },
+    });
+
+    expect(wrapper.find('[data-testid="write-line"]').exists()).toBe(false);
+    expect(wrapper.get('[data-component="write-content"]').text()).toContain(
+      "hi",
+    );
   });
 });
