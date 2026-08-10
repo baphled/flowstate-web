@@ -5,6 +5,7 @@ export { RENDER_MAX_LINES, RENDER_MAX_BYTES } from "./bashToolConstants";
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import CopyButton from "./CopyButton.vue";
+import HighlightedCode from "./HighlightedCode.vue";
 import ToolBubble from "./ToolBubble.vue";
 import type { ToolRendererProps } from "./toolRendererProps";
 import { RENDER_MAX_LINES, RENDER_MAX_BYTES } from "./bashToolConstants";
@@ -21,7 +22,9 @@ const props = withDefaults(defineProps<ToolRendererProps>(), {
 // extra click.
 const cardDefaultOpen = computed(() => props.status === "error");
 
-const showFull = ref(false);
+// The user asked for full bash output — render the complete body by
+// default and only collapse to the capped slice on explicit "Show less".
+const showFull = ref(true);
 
 interface SliceResult {
   body: string;
@@ -95,15 +98,13 @@ function toggle() {
         ><code>{{ props.heading }}</code></pre>
       </section>
 
-      <section v-if="props.body" class="tool-section">
-        <div class="tool-section__header">
-          <span class="tool-section__label">Output</span>
-          <CopyButton :text="props.body" />
-        </div>
-        <pre
-          class="tool-code tool-code--output"
-          data-component="bash-output"
-        ><code>{{ displayedBody }}</code></pre>
+      <section v-if="props.body" class="tool-section" data-component="bash-output">
+        <span class="tool-section__label">Output</span>
+        <HighlightedCode
+          :code="displayedBody"
+          lang="bash"
+          max-height="none"
+        />
         <p
           v-if="bodyTruncated && !showFull"
           class="bash-tool-truncation-hint"
@@ -170,10 +171,6 @@ function toggle() {
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.tool-code--output {
-  background: var(--surface-hover, #16161e);
 }
 
 .bash-tool-truncation-hint {

@@ -178,12 +178,12 @@ describe("BashTool", () => {
       ).toBe(false);
     });
 
-    it("truncates the rendered body when over the line cap, with a show-full-output button", () => {
-      const body = buildBody(500);
+    it("shows the full body by default, with a show-less toggle", () => {
+      const body = buildBody(3000);
       const wrapper = mount(BashTool, {
         props: {
           toolName: "bash",
-          heading: "seq 1 500",
+          heading: "seq 1 3000",
           body,
         },
         global: {
@@ -192,30 +192,23 @@ describe("BashTool", () => {
       });
 
       const output = wrapper.get('[data-component="bash-output"]').text();
-      expect(output).toContain(`line-${RENDER_MAX_LINES}`);
-      expect(output).not.toContain(`line-${RENDER_MAX_LINES + 1}`);
-
-      const hint = wrapper.get(
-        '[data-component="bash-output-truncation-hint"]',
-      );
-      expect(hint.text()).toContain(`${500 - RENDER_MAX_LINES} lines hidden`);
-      expect(hint.text()).toContain("grep");
-      expect(hint.text()).toContain("sort");
-      expect(hint.text()).toContain("cat");
-      expect(hint.text()).toContain("Show full output");
+      expect(output).toContain("line-3000");
 
       const toggle = wrapper.get('[data-component="bash-output-toggle"]');
-      expect(toggle.attributes("aria-label")).toBe("Show full output");
-      expect(toggle.attributes("aria-expanded")).toBe("false");
-      expect(toggle.text()).toContain("Show full output");
+      expect(toggle.attributes("aria-label")).toBe("Hide full output");
+      expect(toggle.attributes("aria-expanded")).toBe("true");
+      expect(toggle.text()).toContain("Show less");
+      expect(
+        wrapper.find('[data-component="bash-output-truncation-hint"]').exists(),
+      ).toBe(false);
     });
 
-    it("expands to the full body when the toggle is clicked", async () => {
-      const body = buildBody(500);
+    it("collapses to the capped slice on toggle, then expands back", async () => {
+      const body = buildBody(3000);
       const wrapper = mount(BashTool, {
         props: {
           toolName: "bash",
-          heading: "seq 1 500",
+          heading: "seq 1 3000",
           body,
         },
         global: {
@@ -228,21 +221,40 @@ describe("BashTool", () => {
         .trigger("click");
 
       const output = wrapper.get('[data-component="bash-output"]').text();
-      expect(output).toContain("line-500");
+      expect(output).toContain(`line-${RENDER_MAX_LINES}`);
+      expect(output).not.toContain(`line-${RENDER_MAX_LINES + 1}`);
+
+      const hint = wrapper.get(
+        '[data-component="bash-output-truncation-hint"]',
+      );
+      expect(hint.text()).toContain(`${3000 - RENDER_MAX_LINES} lines hidden`);
+      expect(hint.text()).toContain("grep");
+      expect(hint.text()).toContain("sort");
+      expect(hint.text()).toContain("cat");
+      expect(hint.text()).toContain("Show full output");
 
       const toggle = wrapper.get('[data-component="bash-output-toggle"]');
-      expect(toggle.attributes("aria-label")).toBe("Hide full output");
-      expect(toggle.attributes("aria-expanded")).toBe("true");
-      expect(toggle.text()).toContain("Show less");
+      expect(toggle.attributes("aria-label")).toBe("Show full output");
+      expect(toggle.attributes("aria-expanded")).toBe("false");
+      expect(toggle.text()).toContain("Show full output");
+
+      await wrapper
+        .get('[data-component="bash-output-toggle"]')
+        .trigger("click");
+
+      const expanded = wrapper.get('[data-component="bash-output"]').text();
+      expect(expanded).toContain("line-3000");
+      const toggleAgain = wrapper.get('[data-component="bash-output-toggle"]');
+      expect(toggleAgain.attributes("aria-label")).toBe("Hide full output");
+      expect(toggleAgain.attributes("aria-expanded")).toBe("true");
+      expect(toggleAgain.text()).toContain("Show less");
       expect(
         wrapper.find('[data-component="bash-output-truncation-hint"]').exists(),
       ).toBe(false);
     });
 
-    it("truncates by byte cap when the byte budget hits before the line cap", () => {
-      // 50 lines, each ~200 bytes → ~10KB total, well over RENDER_MAX_BYTES (8KB)
-      // but well under RENDER_MAX_LINES (200), so the byte cap must be the trigger.
-      const padding = "x".repeat(199);
+    it("truncates by byte cap when the byte budget hits before the line cap", async () => {
+      const padding = "x".repeat(1400);
       const body = buildBody(50, (i) => `${i}-${padding}`);
       expect(body.length).toBeGreaterThan(RENDER_MAX_BYTES);
 
@@ -257,7 +269,10 @@ describe("BashTool", () => {
         },
       });
 
-      const output = wrapper.get('[data-component="bash-output"]').text();
+      await wrapper
+        .get('[data-component="bash-output-toggle"]')
+        .trigger("click");
+
       // Rendered slice must be byte-bounded under the line count.
       // Allow some slack for the trailing newline boundary; the rendered slice
       // of body characters must be <= RENDER_MAX_BYTES.
@@ -265,7 +280,9 @@ describe("BashTool", () => {
         .get('[data-component="bash-output"] code')
         .text();
       expect(bashOutputCode.length).toBeLessThanOrEqual(RENDER_MAX_BYTES);
-      expect(output).not.toContain("50-");
+      expect(wrapper.get('[data-component="bash-output"]').text()).not.toContain(
+        "50-",
+      );
       expect(
         wrapper.find('[data-component="bash-output-toggle"]').exists(),
       ).toBe(true);
