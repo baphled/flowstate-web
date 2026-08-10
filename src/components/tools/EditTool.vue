@@ -141,12 +141,214 @@ function parseHunks(body: string): DiffHunk[] {
   return hunks;
 }
 
+/**
+ * The backend edit tool reports results as a single-line sentence,
+ * `replaced "<old>" with "<new>" in <path>`, with the quoted strings
+ * JSON-escaped. Parse that shape when present so the renderer can
+ * synthesise a unified-diff hunk instead of showing raw escaped text.
+ */
+const REPLACE_STATEMENT_RE =
+  /^replaced "((?:[^"\\]|\\.)*)" with "((?:[^"\\]|\\.)*)" in (.+)$/;
+
+/**
+ * Decode a JSON-escaped string fragment by wrapping it in quotes and
+ * letting JSON.parse handle the escapes. Falls back to the raw fragment
+ * when the fragment is not valid JSON-escaped content.
+ */
+function unescapeString(escaped: string): string {
+  try {
+    const parsed = JSON.parse(`"${escaped}"`);
+    return typeof parsed === "string" ? parsed : escaped;
+  } catch {
+    return escaped;
+  }
+}
+
+function parseReplaceStatement(body: string): {
+  oldString: string;
+  newString: string;
+  filePath: string;
+} | null {
+  const match = body.match(REPLACE_STATEMENT_RE);
+  if (!match) {
+    return null;
+  }
+  return {
+    oldString: unescapeString(match[1]),
+    newString: unescapeString(match[2]),
+    filePath: match[3],
+  };
+}
+
+/**
+ * The structured tool args (`{"filePath", "oldString", "newString"}`) are
+ * authoritative when present — no unescaping needed and they cannot be
+ * altered by the sentence formatter.
+ */
+function parseToolInputStrings(): {
+  oldString: string;
+  newString: string;
+} | null {
+  if (!props.toolInput) return null;
+  try {
+    const parsed: unknown = JSON.parse(props.toolInput);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      if (
+        typeof record.oldString === "string" &&
+        typeof record.newString === "string"
+      ) {
+        return { oldString: record.oldString, newString: record.newString };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a single synthetic hunk from an old/new string pair: the common
+ * prefix and suffix become context lines, the middle becomes removed
+ * (old-only) then added (new-only) lines carrying `-`/`+` glyphs, numbered
+ * on the same gutters as parseHunks.
+ */
+function buildReplaceHunk(oldString: string, newString: string): DiffHunk {
+  const oldLines = oldString === "" ? [] : oldString.split("\n");
+  const newLines = newString === "" ? [] : newString.split("\n");
+
+  let prefixLen = 0;
+  const minLen = Math.min(oldLines.length, newLines.length);
+  while (prefixLen < minLen && oldLines[prefixLen] === newLines[prefixLen]) {
+    prefixLen += 1;
+  }
+
+  let suffixLen = 0;
+  while (
+    prefixLen + suffixLen < oldLines.length &&
+    prefixLen + suffixLen < newLines.length &&
+    oldLines[oldLines.length - 1 - suffixLen] ===
+      newLines[newLines.length - 1 - suffixLen]
+  ) {
+    suffixLen += 1;
+  }
+
+  const lines: DiffHunkLine[] = [];
+  let oldCursor = 1;
+  let newCursor = 1;
+
+  const pushContext = (text: string): void => {
+    lines.push({
+      text,
+      kind: "plain",
+      oldLine: String(oldCursor),
+      newLine: String(newCursor),
+    });
+    oldCursor += 1;
+    newCursor += 1;
+  };
+
+  for (let i = 0; i < prefixLen; i += 1) {
+    pushContext(oldLines[i]);
+  }
+
+  const oldMiddleEnd = oldLines.length - suffixLen;
+  for (let i = prefixLen; i < oldMiddleEnd; i += 1) {
+    lines.push({
+      text: `-${oldLines[i]}`,
+      kind: "removed",
+      oldLine: String(oldCursor),
+      newLine: "",
+    });
+    oldCursor += 1;
+  }
+
+  const newMiddleEnd = newLines.length - suffixLen;
+  for (let i = prefixLen; i < newMiddleEnd; i += 1) {
+    lines.push({
+      text: `+${newLines[i]}`,
+      kind: "added",
+      oldLine: "",
+      newLine: String(newCursor),
+    });
+    newCursor += 1;
+  }
+
+  for (let i = oldLines.length - suffixLen; i < oldLines.length; i += 1) {
+    pushContext(oldLines[i]);
+  }
+
+  return {
+    header: `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
+    oldStart: 1,
+    newStart: 1,
+    lines,
+  };
+}
+
+/**
+ * A no-op edit (identical old/new, or empty strings) produces no added or
+ * removed lines — drop the hunk so the renderer falls back to the flat
+ * line view instead of showing a pointless all-context block.
+ */
+function buildReplaceHunks(oldString: string, newString: string): DiffHunk[] {
+  const hunk = buildReplaceHunk(oldString, newString);
+  const hasChanges = hunk.lines.some(
+    (line) => line.kind === "added" || line.kind === "removed",
+  );
+  return hasChanges ? [hunk] : [];
+}
+
 const hunks = computed<DiffHunk[]>(() => {
-  if (!props.body.includes("@@")) return [];
-  return parseHunks(props.body);
+  if (props.body.includes("@@")) {
+    return parseHunks(props.body);
+  }
+
+  const toolInputStrings = parseToolInputStrings();
+  if (toolInputStrings) {
+    return buildReplaceHunks(
+      toolInputStrings.oldString,
+      toolInputStrings.newString,
+    );
+  }
+
+  const statement = parseReplaceStatement(props.body);
+  if (statement) {
+    return buildReplaceHunks(statement.oldString, statement.newString);
+  }
+
+  return [];
 });
 
 const hasHunks = computed(() => hunks.value.length > 0);
+
+interface DiffCounts {
+  added: number;
+  removed: number;
+}
+
+function countByKind(lines: Array<{ kind: EditLineKind }>): DiffCounts {
+  let added = 0;
+  let removed = 0;
+  for (const line of lines) {
+    if (line.kind === "added") added += 1;
+    else if (line.kind === "removed") removed += 1;
+  }
+  return { added, removed };
+}
+
+// UI Parity — opencode-style `+N -M` tally above the diff. Prefers the
+// parsed hunks; the flat line list covers legacy bodies without @@ markers.
+const diffCounts = computed<DiffCounts>(() => {
+  if (hasHunks.value) {
+    return countByKind(hunks.value.flatMap((hunk) => hunk.lines));
+  }
+  return countByKind(lines.value);
+});
+
+const hasDiffCounts = computed(
+  () => diffCounts.value.added > 0 || diffCounts.value.removed > 0,
+);
 </script>
 
 <template>
@@ -161,6 +363,20 @@ const hasHunks = computed(() => hunks.value.length > 0);
       <div class="tool-renderer__header">
         <span class="tool-renderer__label">Patch</span>
         <CopyButton :text="props.body" />
+      </div>
+      <div
+        v-if="hasDiffCounts"
+        class="tool-diff-summary"
+        data-testid="diff-summary"
+      >
+        <span class="tool-diff-summary__added" data-testid="diff-summary-added"
+          >+{{ diffCounts.added }}</span
+        >
+        <span
+          class="tool-diff-summary__removed"
+          data-testid="diff-summary-removed"
+          >-{{ diffCounts.removed }}</span
+        >
       </div>
       <!--
         UI Parity PR6 N5 — when the body carries `@@` hunk markers, render
@@ -215,6 +431,24 @@ const hasHunks = computed(() => hunks.value.length > 0);
   font-size: 0.78rem;
   font-weight: 600;
   text-transform: uppercase;
+}
+
+.tool-diff-summary {
+  display: flex;
+  gap: 0.5rem;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.tool-diff-summary__added {
+  color: #9ece6a;
+}
+
+.tool-diff-summary__removed {
+  color: var(--error, #f7768e);
 }
 
 .tool-code {

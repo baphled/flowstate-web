@@ -204,4 +204,256 @@ describe("EditTool", () => {
       expect(wrapper.find('[data-line-kind="added"]').text()).toContain("+new");
     });
   });
+
+  describe("N5 — opencode-style add/remove summary", () => {
+    it("shows +N -M counts above the diff, counted from the parsed hunks", () => {
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "/tmp/summary.txt",
+          body: "@@ -1,3 +1,3 @@\n context\n-old-1\n+new-1\n+new-2",
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      const summary = wrapper.get('[data-testid="diff-summary"]');
+      expect(
+        summary.get('[data-testid="diff-summary-added"]').text(),
+      ).toBe("+2");
+      expect(
+        summary.get('[data-testid="diff-summary-removed"]').text(),
+      ).toBe("-1");
+    });
+
+    it("counts added/removed lines in the legacy flat format when there are no hunks", () => {
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "/tmp/legacy.txt",
+          body: "-a\n-b\n+c\n+d\n+e",
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      const summary = wrapper.get('[data-testid="diff-summary"]');
+      expect(summary.text()).toContain("+3");
+      expect(summary.text()).toContain("-2");
+    });
+
+    it("hides the summary when the body carries no diff markers", () => {
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "/tmp/plain.txt",
+          body: "plain replacement text",
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      expect(wrapper.find('[data-testid="diff-summary"]').exists()).toBe(false);
+    });
+  });
+
+  describe("multiedit — multi-hunk rendering through EditTool", () => {
+    it("renders the multiedit tool name, summary, hunk headers, and line styling", () => {
+      const body = [
+        "@@ -10,3 +10,4 @@",
+        " unchanged",
+        "-old line",
+        "+new line",
+        " unchanged",
+        "@@ -20,2 +21,3 @@",
+        " context",
+        "+added line",
+        " context",
+      ].join("\n");
+
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "multiedit",
+          heading: "/tmp/multi-edit.txt",
+          body,
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      expect(
+        wrapper.get('[data-testid="tool-bubble"]').attributes("data-tool"),
+      ).toBe("multiedit");
+      expect(wrapper.get('[data-testid="tool-title"]').text()).toBe("multiedit");
+      expect(wrapper.get('[data-testid="tool-subtitle"]').text()).toBe(
+        "/tmp/multi-edit.txt",
+      );
+
+      const summary = wrapper.get('[data-testid="diff-summary"]');
+      expect(
+        summary.get('[data-testid="diff-summary-added"]').text(),
+      ).toBe("+2");
+      expect(
+        summary.get('[data-testid="diff-summary-removed"]').text(),
+      ).toBe("-1");
+
+      const hunks = wrapper.findAll('[data-testid="edit-hunk"]');
+      expect(hunks).toHaveLength(2);
+
+      const headers = wrapper.findAll('[data-testid="edit-hunk-header"]');
+      expect(headers).toHaveLength(2);
+      expect(headers[0].text()).toContain("@@ -10,3 +10,4 @@");
+      expect(headers[1].text()).toContain("@@ -20,2 +21,3 @@");
+
+      const removed = wrapper.findAll('[data-line-kind="removed"]');
+      expect(removed).toHaveLength(1);
+      expect(removed[0].text()).toContain("-old line");
+
+      const added = wrapper.findAll('[data-line-kind="added"]');
+      expect(added).toHaveLength(2);
+      expect(added[0].text()).toContain("+new line");
+      expect(added[1].text()).toContain("+added line");
+    });
+  });
+
+  describe("replace-statement diffs (backend sentence format)", () => {
+    it('renders a "replaced X with Y in Z" body as a proper diff', () => {
+      const body =
+        'replaced "line one\\nline two" with "line one\\nline two\\nline three" in /tmp/test.go';
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "/tmp/test.go",
+          body,
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      const summary = wrapper.get('[data-testid="diff-summary"]');
+      expect(summary.get('[data-testid="diff-summary-added"]').text()).toBe(
+        "+1",
+      );
+      expect(summary.get('[data-testid="diff-summary-removed"]').text()).toBe(
+        "-0",
+      );
+
+      expect(wrapper.find('[data-testid="edit-hunk"]').exists()).toBe(true);
+      expect(wrapper.get('[data-testid="edit-hunk-header"]').text()).toContain(
+        "@@ -1,2 +1,3 @@",
+      );
+
+      const added = wrapper.find('[data-line-kind="added"]');
+      expect(added.text()).toContain("+line three");
+      expect(wrapper.findAll('[data-line-kind="plain"]')).toHaveLength(2);
+    });
+
+    it("prefers structured toolInput oldString/newString over the body statement", () => {
+      const body =
+        'replaced "line one\\nline two" with "line one\\nline two\\nline three" in /tmp/test.go';
+      const toolInput = JSON.stringify({
+        filePath: "/tmp/test.go",
+        oldString: "a\nb\nc",
+        newString: "a\nb\nc\nd\ne",
+      });
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "/tmp/test.go",
+          body,
+          toolInput,
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      // The body alone would produce +1; toolInput produces +2, proving
+      // the structured source wins the priority.
+      const summary = wrapper.get('[data-testid="diff-summary"]');
+      expect(summary.get('[data-testid="diff-summary-added"]').text()).toBe(
+        "+2",
+      );
+      expect(wrapper.get('[data-testid="edit-hunk-header"]').text()).toContain(
+        "@@ -1,3 +1,5 @@",
+      );
+    });
+
+    it("unescapes \\n and \\t escapes inside the quoted strings", () => {
+      const body =
+        'replaced "line one\\n\\tline two" with "line one\\n\\tline two\\nline three" in /tmp/test.go';
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "/tmp/test.go",
+          body,
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      const lines = wrapper.findAll('[data-testid="edit-line"]');
+      expect(lines).toHaveLength(3);
+      // The second context line carries the unescaped tab.
+      expect(lines[1].text()).toContain("\tline two");
+      expect(wrapper.find('[data-line-kind="added"]').text()).toContain(
+        "+line three",
+      );
+    });
+
+    it("falls back to flat rendering when the body matches neither format", () => {
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "/tmp/plain.txt",
+          body: "just some plain text\nno diff markers",
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      expect(wrapper.find('[data-testid="edit-hunk"]').exists()).toBe(false);
+      expect(wrapper.find('[data-line-kind="plain"]').exists()).toBe(true);
+      expect(wrapper.text()).toContain("just some plain text");
+    });
+
+    it("renders no hunk when oldString and newString are identical", () => {
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "/tmp/noop.txt",
+          toolInput: JSON.stringify({
+            oldString: "same\ncontent",
+            newString: "same\ncontent",
+          }),
+          body: "anything",
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      expect(wrapper.find('[data-testid="edit-hunk"]').exists()).toBe(false);
+    });
+
+    it("treats an empty oldString as a pure addition", () => {
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "/tmp/new.txt",
+          toolInput: JSON.stringify({ oldString: "", newString: "a\nb" }),
+          body: "anything",
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      const summary = wrapper.get('[data-testid="diff-summary"]');
+      expect(summary.get('[data-testid="diff-summary-added"]').text()).toBe(
+        "+2",
+      );
+      expect(wrapper.findAll('[data-line-kind="added"]')).toHaveLength(2);
+      expect(wrapper.get('[data-testid="edit-hunk-header"]').text()).toContain(
+        "@@ -1,0 +1,2 @@",
+      );
+    });
+  });
 });
