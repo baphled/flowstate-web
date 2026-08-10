@@ -162,19 +162,36 @@ const statusIcon = computed(() => {
   background: var(--surface-hover, rgba(255, 255, 255, 0.05));
 }
 
+/**
+ * The trigger row is a flex row (chevron + header-text + status icon), and
+ * flex: 1 alone cannot shrink this item: a flex item's default
+ * min-width: auto forbids shrinking below its longest word's intrinsic
+ * width. A long unbroken bash command token therefore overflowed
+ * .tool-bubble (overflow: hidden) and was hard-clipped in the collapsed
+ * card — the subtitle could never wrap. min-width: 0 restores the ability
+ * to shrink so the text wraps instead of clipping.
+ */
 .tool-bubble__header-text {
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-width: 0;
 }
 
 .tool-bubble__title {
   font-weight: 500;
 }
 
+/**
+ * Long unbroken command tokens (paths, flags) must break at any character
+ * boundary when no other break opportunity exists; otherwise they overflow
+ * the trigger row and the collapsed card clips the command. This keeps the
+ * FULL command visible (wrapped) instead of truncated.
+ */
 .tool-bubble__subtitle {
   font-size: 0.75rem;
   color: var(--text-muted, #565f89);
+  overflow-wrap: anywhere;
 }
 
 .tool-bubble__chevron {
