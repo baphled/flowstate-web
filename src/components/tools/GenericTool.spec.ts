@@ -85,7 +85,9 @@ describe("GenericTool", () => {
       },
     });
 
-    const renderedInput = wrapper.get('[data-component="generic-tool-input"]');
+    const renderedInput = wrapper.findAll(
+      '[data-component="highlighted-code"]',
+    )[0];
     expect(renderedInput.text().length).toBe(203);
     expect(renderedInput.text().endsWith("...")).toBe(true);
   });
