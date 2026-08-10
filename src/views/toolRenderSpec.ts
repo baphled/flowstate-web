@@ -48,9 +48,10 @@ const sensitiveKeySubstrings = [
 
 const redactedPlaceholder = "[REDACTED]";
 
-// truncateLen caps any rendered display value uniformly. Applies to bash
-// commands and the fallback path so MCP tools with huge JSON blobs cannot
-// blow up the card.
+// truncateLen caps the compact-JSON fallback blob only. Tool titles show
+// the full command/path for every tool; only the compact-JSON fallback
+// blob keeps a cap so MCP tools with huge JSON blobs cannot blow up the
+// card.
 const truncateLen = 80;
 
 function truncate(s: string): string {
@@ -112,7 +113,9 @@ function compactJSONFallback(args: Record<string, unknown>): string | null {
   if (parts.length === 0) {
     return null;
   }
-  return `{${parts.join(",")}}`;
+  const rendered = `{${parts.join(",")}}`;
+  const capped = truncate(rendered);
+  return capped === "" ? null : capped;
 }
 
 function resolvePrimaryValue(
@@ -137,17 +140,15 @@ function resolvePrimaryValue(
   return compactJSONFallback(args);
 }
 
+/**
+ * Tool titles show the full command/path for every tool; only the
+ * compact-JSON fallback blob keeps a cap (see compactJSONFallback).
+ */
 function formatHeadingValue(
-  toolName: string,
+  _toolName: string,
   rawValue: string,
 ): string {
-  // Bash commands are never truncated so the full command is always visible.
-  // All other tools keep the 80-char cap to prevent huge JSON blobs from
-  // blowing up the card.
-  if (toolName === "bash") {
-    return rawValue;
-  }
-  return truncate(rawValue);
+  return rawValue;
 }
 
 function resolveHeading(

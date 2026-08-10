@@ -181,13 +181,26 @@ describe("buildToolRenderSpec", () => {
     expect(buildToolRenderSpec(msg).heading).toBe('→Skill "pre-action"');
   });
 
-  it("truncates long fallback values at 80 characters with an ellipsis", () => {
+  it("shows the full fallback value in the heading", () => {
     const longQuery = "a".repeat(100);
     const msg = makeToolMessage("tool_call", "search_nodes", {
       query: longQuery,
     });
     expect(buildToolRenderSpec(msg).heading).toBe(
-      "search_nodes " + "a".repeat(80) + "...",
+      "search_nodes " + "a".repeat(100),
+    );
+    expect(buildToolRenderSpec(msg).heading).not.toContain("...");
+  });
+
+  it("still caps the compact-JSON fallback blob at 80 characters with an ellipsis", () => {
+    const msg = makeToolMessage("tool_call", "mcp_some_tool", {
+      someLongKey: "x".repeat(200),
+    });
+    const spec = buildToolRenderSpec(msg);
+    expect(spec.heading).toContain("mcp_some_tool {");
+    expect(spec.heading).toContain("...");
+    expect(spec.heading.length).toBeLessThan(
+      "mcp_some_tool ".length + 200,
     );
   });
 
