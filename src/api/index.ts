@@ -222,6 +222,8 @@ export interface SendSessionMessageQueuedResult {
   promptId: string;
   /** 1-based position inside the backend's per-session queue. */
   queuePosition: number;
+  /** The in-flight turn ID this queued prompt waits behind (from active_turn_id). */
+  activeTurnId?: string;
 }
 
 /**
@@ -327,16 +329,28 @@ export async function sendSessionMessage(
     session_id?: string;
     queuePosition?: number;
     promptId?: string;
+    queued?: boolean;
+    queue_position?: number;
+    prompt_id?: string;
+    active_turn_id?: string;
   };
-  if (res.status === 202 && parsed.status === "queued") {
-    // Per-session prompt queue (May 2026): the session is busy, the
-    // backend accepted the prompt into its queue. Wire shape:
-    //   { status: "queued", session_id, queuePosition, promptId }
+  if (res.status === 202 && parsed.queued === true) {
+    // Per-session prompt queue — the BE is the single source of truth.
+    // Wire shape (server-authoritative, snake_case):
+    //   { queued: true, queue_position, prompt_id, active_turn_id, turn_id: "" }
     return {
       queued: true,
       sessionId: typeof parsed.session_id === "string" ? parsed.session_id : sessionId,
-      promptId: typeof parsed.promptId === "string" ? parsed.promptId : "",
-      queuePosition: typeof parsed.queuePosition === "number" ? parsed.queuePosition : 1,
+      promptId:
+        typeof parsed.prompt_id === "string" ? parsed.prompt_id :
+        typeof parsed.promptId === "string" ? parsed.promptId : "",
+      queuePosition:
+        typeof parsed.queue_position === "number" ? parsed.queue_position :
+        typeof parsed.queuePosition === "number" ? parsed.queuePosition : 1,
+      activeTurnId:
+        typeof parsed.active_turn_id === "string" && parsed.active_turn_id.length > 0
+          ? parsed.active_turn_id
+          : undefined,
     };
   }
   // A 202 that is not the queue shape is a contract violation — fall

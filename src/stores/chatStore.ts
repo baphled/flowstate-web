@@ -3675,6 +3675,11 @@ export const useChatStore = defineStore('chat', {
         // block must skip its flag-clear — flagged via `wasQueued`.
         if (sentResult.queued) {
           wasQueued = true
+          // Seed the watcher with the in-flight turn id so it knows which
+          // turn to skip when polling for the queued prompt's NEW turn.
+          if (sentResult.activeTurnId) {
+            this.lastPollTurnIdBySession[capturedSessionId] = sentResult.activeTurnId
+          }
           this.markPromptQueued(capturedSessionId, optimisticMessage.id, text, sentResult)
           void this.watchQueuedPrompts(capturedSessionId)
           return

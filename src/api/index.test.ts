@@ -151,14 +151,16 @@ describe("sendSessionMessage", () => {
   // mirrors the entry locally (promptId + queuePosition) instead of
   // keeping a client-side copy, so the response must be discriminated
   // from the normal turn_id/snapshot shape.
-  it("returns a queued result with promptId + queuePosition on 202 status queued", async () => {
+  it("returns a queued result with promptId + queuePosition on 202 queued (server-authoritative wire format)", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
-          status: "queued",
+          queued: true,
           session_id: "sess-1",
-          queuePosition: 2,
-          promptId: "prompt-abc",
+          queue_position: 2,
+          prompt_id: "prompt-abc",
+          active_turn_id: "turn-in-flight",
+          turn_id: "",
         }),
         { status: 202, headers: { "Content-Type": "application/json" } },
       ),
@@ -171,6 +173,7 @@ describe("sendSessionMessage", () => {
       expect(result.sessionId).toBe("sess-1");
       expect(result.promptId).toBe("prompt-abc");
       expect(result.queuePosition).toBe(2);
+      expect(result.activeTurnId).toBe("turn-in-flight");
     }
   });
 
