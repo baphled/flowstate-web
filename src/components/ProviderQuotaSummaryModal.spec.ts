@@ -1,195 +1,158 @@
-/**
- * ProviderQuotaSummaryModal.spec.ts — vitest spec for the provider
- * quota overview modal.
- *
- * Pins:
- *   - Renders a row per known snapshot from the quota store.
- *   - Sorted by (provider, model).
- *   - Shows status badge, key metric, and reset/period column.
- *   - Empty state when no snapshots exist.
- *   - Close on Escape / backdrop click / X button.
- *   - Clicking a row emits `select` with the snapshot payload.
- *   - Focus trap is active while open.
- */
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { setActivePinia, createPinia } from "pinia";
+import { createPinia, setActivePinia } from "pinia";
 import ProviderQuotaSummaryModal from "./ProviderQuotaSummaryModal.vue";
-import { useQuotaStore, type ProviderQuotaSnapshot } from "@/stores/quotaStore";
+import { useQuotaStore } from "@/stores/quotaStore";
 import type { SSEProviderQuotaEvent } from "@/lib/sseEvent";
 
 /**
- * Helper — seed the quota store with an SSE event via its action so
- * the modal reads live snapshots.
+ * ProviderQuotaSummaryModal specs — verify the summary modal renders
+ * every observed provider snapshot with the correct summary label.
  */
-function seedSnapshot(
-  overrides: Partial<SSEProviderQuotaEvent> & {
-    provider: string;
-    model: string;
-  },
-): void {
-  const store = useQuotaStore();
-  const base: SSEProviderQuotaEvent = {
+
+function baseSnapshot(variant: "rate_limit" | "token_spend" | "not_configured"): SSEProviderQuotaEvent {
+  return {
     kind: "provider_quota",
-    provider: overrides.provider,
-    accountHash: overrides.accountHash ?? "deadbeef",
-    model: overrides.model,
-    observedAt: overrides.observedAt ?? "2026-05-13T12:00:00Z",
-    stale: overrides.stale ?? false,
-    storeBackend: overrides.storeBackend ?? "memory",
-    pricingSource: overrides.pricingSource ?? "",
-    variant: overrides.variant ?? "rate_limit",
-    rateLimit: overrides.rateLimit ?? {
-      requests: { limit: 100, remaining: 42, reset: "2026-05-13T12:05:00Z" },
-      tokens: {
-        limit: 100000,
-        remaining: 12000,
-        reset: "2026-05-13T12:05:00Z",
-      },
-      input: { limit: 50000, remaining: 7000, reset: "2026-05-13T12:05:00Z" },
-      output: {
-        limit: 50000,
-        remaining: 5000,
-        reset: "2026-05-13T12:05:00Z",
-      },
-      tightestPercentRemaining: 12,
-      tightestResetAt: "2026-05-13T12:05:00Z",
-    },
-    tokenSpend: overrides.tokenSpend ?? null,
-    notConfigured: overrides.notConfigured ?? null,
-    rateLimitedUntil: overrides.rateLimitedUntil ?? "",
-    status: overrides.status ?? "healthy",
+    provider: "anthropic",
+    accountHash: "a1b2c3d4",
+    model: "claude-opus-4-7",
+    observedAt: "2026-05-13T12:00:00Z",
+    stale: false,
+    storeBackend: "memory",
+    pricingSource: "flowstate-default-v1",
+    variant,
+    rateLimit: null,
+    tokenSpend: null,
+    notConfigured: null,
   };
-  store.applyProviderQuotaEvent(base);
 }
 
 describe("ProviderQuotaSummaryModal", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-13T12:00:00Z"));
   });
 
-  function mountModal(open = true) {
-    return mount(ProviderQuotaSummaryModal, {
-      props: { open },
-      global: {
-        stubs: { useFocusTrap: true },
-      },
-    });
-  }
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   describe("visibility", () => {
-    it("renders nothing when open is false", () => {
-      const wrapper = mountModal(false);
-      expect(wrapper.find('[data-testid="provider-quota-summary-backdrop"]').exists()).toBe(false);
+    it("does not render when open=false", async () => {
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: false } });
+      await flushPromises();
+      expect(wrapper.find('[data-testid="quota-summary-overlay"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="quota-summary-panel"]').exists()).toBe(false);
     });
 
-    it("renders the backdrop when open is true", () => {
-      const wrapper = mountModal(true);
-      expect(wrapper.find('[data-testid="provider-quota-summary-backdrop"]').exists()).toBe(true);
+    it("renders the overlay and panel when open=true", async () => {
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      expect(wrapper.find('[data-testid="quota-summary-overlay"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="quota-summary-panel"]').exists()).toBe(true);
     });
   });
 
   describe("empty state", () => {
-    it('shows an empty-state message when no snapshots exist', () => {
-      const wrapper = mountModal(true);
-      expect(
-        wrapper.find('[data-testid="provider-quota-summary-empty"]').exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-testid="provider-quota-summary-table"]').exists(),
-      ).toBe(false);
+    it("shows empty-state text when no snapshots exist", async () => {
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      const empty = wrapper.find('[data-testid="quota-summary-empty"]');
+      expect(empty.exists()).toBe(true);
+      expect(empty.text()).toContain("No provider quota data yet.");
     });
   });
 
-  describe("populated state", () => {
-    it("renders one row per snapshot sorted by provider then model", () => {
-      seedSnapshot({ provider: "openai", model: "gpt-4o", variant: "token_spend", status: "spent" });
-      seedSnapshot({ provider: "anthropic", model: "claude-opus-4-7", variant: "rate_limit", status: "healthy" });
-      seedSnapshot({ provider: "anthropic", model: "claude-sonnet-4-7", variant: "rate_limit", status: "healthy" });
-
-      const wrapper = mountModal(true);
-      const rows = wrapper.findAll('[data-testid="provider-quota-summary-row"]');
-
-      expect(rows).toHaveLength(3);
-      const providers = rows.map((r) => r.attributes("data-provider"));
-      const models = rows.map((r) => r.attributes("data-model"));
-      expect(providers).toEqual(["anthropic", "anthropic", "openai"]);
-      expect(models).toEqual([
-        "claude-opus-4-7",
-        "claude-sonnet-4-7",
-        "gpt-4o",
-      ]);
-    });
-
-    it("renders the provider name in the first column", () => {
-      seedSnapshot({ provider: "anthropic", model: "claude-opus-4-7" });
-      const wrapper = mountModal(true);
-      const cells = wrapper.findAll('[data-testid="summary-cell-provider"]');
-      expect(cells).toHaveLength(1);
-      expect(cells[0].text()).toContain("anthropic");
-    });
-
-    it("renders the model name in the second column", () => {
-      seedSnapshot({ provider: "anthropic", model: "claude-opus-4-7" });
-      const wrapper = mountModal(true);
-      const cells = wrapper.findAll('[data-testid="summary-cell-model"]');
-      expect(cells).toHaveLength(1);
-      expect(cells[0].text()).toBe("claude-opus-4-7");
-    });
-
-    it("renders a status badge with the snapshot's status", () => {
-      seedSnapshot({
+  describe("all not-configured state", () => {
+    it("shows all-not-configured hint when every snapshot is not_configured", async () => {
+      const store = useQuotaStore();
+      store.applyProviderQuotaEvent({
+        ...baseSnapshot("not_configured"),
         provider: "anthropic",
-        model: "claude-opus-4-7",
-        status: "rate_limited",
+        model: "claude-3-5-sonnet",
+        notConfigured: { reason: "awaiting-first-response" },
       });
-      const wrapper = mountModal(true);
-      const badges = wrapper.findAll('[data-testid="summary-status-badge"]');
-      expect(badges).toHaveLength(1);
-      expect(badges[0].text()).toBe("rate_limited");
-    });
-
-    it("renders '—' for empty status", () => {
-      seedSnapshot({
-        provider: "ollama",
-        model: "llama3",
-        variant: "not_configured",
-        status: "",
+      store.applyProviderQuotaEvent({
+        ...baseSnapshot("not_configured"),
+        provider: "openai",
+        model: "gpt-4o",
+        notConfigured: { reason: "no-quota-store" },
       });
-      const wrapper = mountModal(true);
-      const badges = wrapper.findAll('[data-testid="summary-status-badge"]');
-      expect(badges[0].text()).toBe("—");
-    });
 
-    it("renders rate-limit percent + reset countdown for rate_limit variant", () => {
-      seedSnapshot({
-        provider: "anthropic",
-        model: "claude-opus-4-7",
-        variant: "rate_limit",
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      const hint = wrapper.find('[data-testid="quota-summary-all-nc"]');
+      expect(hint.exists()).toBe(true);
+      expect(hint.text()).toContain("not configured");
+    });
+  });
+
+  describe("entry rendering", () => {
+    function seedRateLimit(pct: number, resetIso: string) {
+      useQuotaStore().applyProviderQuotaEvent({
+        ...baseSnapshot("rate_limit"),
         rateLimit: {
-          requests: { limit: 100, remaining: 5, reset: "" },
-          tokens: { limit: 100000, remaining: 12000, reset: "" },
-          input: { limit: 50000, remaining: 7000, reset: "" },
-          output: { limit: 50000, remaining: 5000, reset: "" },
-          tightestPercentRemaining: 5,
+          requests: { limit: 1000, remaining: Math.round(1000 * pct / 100), reset: resetIso },
+          tokens: { limit: 100000, remaining: Math.round(100000 * pct / 100), reset: resetIso },
+          input: { limit: -1, remaining: -1, reset: "" },
+          output: { limit: -1, remaining: -1, reset: "" },
+          tightestPercentRemaining: pct,
+          tightestResetAt: resetIso,
+        },
+      });
+    }
+
+    function seedTokenSpend(spentMinor: number, capMinor: number) {
+      useQuotaStore().applyProviderQuotaEvent({
+        ...baseSnapshot("token_spend"),
+        tokenSpend: {
+          spentMinor,
+          spentCurrency: "USD",
+          spentUsdMinor: spentMinor,
+          capMinor,
+          capCurrency: "USD",
+          period: "monthly",
+          periodStart: "2026-05-01T00:00:00Z",
+          periodEnd: "2026-06-01T00:00:00Z",
+          thresholdAmber: 80,
+          thresholdRed: 95,
+        },
+      });
+    }
+
+    it("renders multiple entries sorted by provider then model", async () => {
+      useQuotaStore().applyProviderQuotaEvent({
+        ...baseSnapshot("rate_limit"),
+        provider: "zai",
+        accountHash: "z1",
+        model: "z-model",
+        rateLimit: {
+          requests: { limit: 1000, remaining: 500, reset: "" },
+          tokens: { limit: 100000, remaining: 50000, reset: "" },
+          input: { limit: -1, remaining: -1, reset: "" },
+          output: { limit: -1, remaining: -1, reset: "" },
+          tightestPercentRemaining: 50,
           tightestResetAt: "",
         },
       });
-      const wrapper = mountModal(true);
-      const cells = wrapper.findAll('[data-testid="summary-cell-metric"]');
-      expect(cells[0].text()).toBe("5%");
-    });
-
-    it("renders token spend $/cap for token_spend variant", () => {
-      seedSnapshot({
+      useQuotaStore().applyProviderQuotaEvent({
+        ...baseSnapshot("not_configured"),
+        provider: "anthropic",
+        accountHash: "a1",
+        model: "claude-sonnet",
+        notConfigured: { reason: "awaiting-first-response" },
+      });
+      useQuotaStore().applyProviderQuotaEvent({
+        ...baseSnapshot("token_spend"),
         provider: "openai",
+        accountHash: "o1",
         model: "gpt-4o",
-        variant: "token_spend",
         tokenSpend: {
-          spentMinor: 241,
+          spentMinor: 500,
           spentCurrency: "USD",
-          spentUsdMinor: 241,
-          capMinor: 5000,
+          spentUsdMinor: 500,
+          capMinor: 10000,
           capCurrency: "USD",
           period: "monthly",
           periodStart: "2026-05-01T00:00:00Z",
@@ -198,33 +161,50 @@ describe("ProviderQuotaSummaryModal", () => {
           thresholdRed: 95,
         },
       });
-      const wrapper = mountModal(true);
-      const cells = wrapper.findAll('[data-testid="summary-cell-metric"]');
-      expect(cells[0].text()).toBe("$2.41 / $50.00");
+
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+
+      const entries = wrapper.findAll('[data-testid^="quota-summary-entry-"]');
+      expect(entries.length).toBe(3);
+
+      const firstProvider = entries[0].find('[data-testid="entry-provider"]');
+      expect(firstProvider.exists()).toBe(true);
+      expect(firstProvider.text()).toBe("anthropic");
+
+      const lastProvider = entries[2].find('[data-testid="entry-provider"]');
+      expect(lastProvider.text()).toBe("zai");
     });
 
-    it("renders 'Not configured' with tooltip reason for not_configured variant", () => {
-      seedSnapshot({
-        provider: "ollama",
-        model: "llama3",
-        variant: "not_configured",
-        notConfigured: { reason: "local-model" },
-      });
-      const wrapper = mountModal(true);
-      const cells = wrapper.findAll('[data-testid="summary-cell-metric"]');
-      expect(cells[0].text()).toContain("Not configured");
+    it("shows rate_limit summary line with percent remaining", async () => {
+      seedRateLimit(42, "2026-05-13T12:03:00Z");
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      const summary = wrapper.find('[data-testid="entry-summary"]');
+      expect(summary.text()).toContain("42%");
+      expect(summary.text()).toContain("remaining");
     });
 
-    it("renders the period label in the reset/period column for token_spend", () => {
-      seedSnapshot({
+    it("shows token_spend summary line with spend / cap", async () => {
+      seedTokenSpend(241, 5000);
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      const summary = wrapper.find('[data-testid="entry-summary"]');
+      expect(summary.text()).toContain("$2.41");
+      expect(summary.text()).toContain("$50.00");
+    });
+
+    it("shows not_configured reason in summary", async () => {
+      useQuotaStore().applyProviderQuotaEvent({
+        ...baseSnapshot("token_spend"),
         provider: "openai",
+        accountHash: "o1",
         model: "gpt-4o",
-        variant: "token_spend",
         tokenSpend: {
-          spentMinor: 241,
+          spentMinor: 500,
           spentCurrency: "USD",
-          spentUsdMinor: 241,
-          capMinor: 5000,
+          spentUsdMinor: 500,
+          capMinor: 10000,
           capCurrency: "USD",
           period: "monthly",
           periodStart: "2026-05-01T00:00:00Z",
@@ -233,70 +213,85 @@ describe("ProviderQuotaSummaryModal", () => {
           thresholdRed: 95,
         },
       });
-      const wrapper = mountModal(true);
-      const cells = wrapper.findAll('[data-testid="summary-cell-period"]');
-      expect(cells[0].text()).toBe("monthly");
+      useQuotaStore().applyProviderQuotaEvent({
+        ...baseSnapshot("not_configured"),
+        provider: "anthropic",
+        accountHash: "a1",
+        model: "claude-sonnet",
+        notConfigured: { reason: "api-key-missing" },
+      });
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      const entries = wrapper.findAll('[data-testid="entry-summary"]');
+      expect(entries.length).toBe(2);
+      expect(entries[0].text()).toContain("api-key-missing");
+    });
+
+    it("shows stale tag when snapshot.stale is true", async () => {
+      useQuotaStore().applyProviderQuotaEvent({
+        ...baseSnapshot("rate_limit"),
+        stale: true,
+        rateLimit: {
+          requests: { limit: 1000, remaining: 500, reset: "" },
+          tokens: { limit: 100000, remaining: 50000, reset: "" },
+          input: { limit: -1, remaining: -1, reset: "" },
+          output: { limit: -1, remaining: -1, reset: "" },
+          tightestPercentRemaining: 50,
+          tightestResetAt: "",
+        },
+      });
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      expect(wrapper.find('[data-testid="entry-stale-tag"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="entry-stale-tag"]').text()).toBe("Stale");
+    });
+
+    it("renders provider, model, and variant badge per entry", async () => {
+      useQuotaStore().applyProviderQuotaEvent({
+        ...baseSnapshot("token_spend"),
+        provider: "openai",
+        model: "gpt-4o",
+        tokenSpend: {
+          spentMinor: 500,
+          spentCurrency: "USD",
+          spentUsdMinor: 500,
+          capMinor: 10000,
+          capCurrency: "USD",
+          period: "monthly",
+          periodStart: "2026-05-01T00:00:00Z",
+          periodEnd: "2026-06-01T00:00:00Z",
+          thresholdAmber: 80,
+          thresholdRed: 95,
+        },
+      });
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      expect(wrapper.find('[data-testid="entry-provider"]').text()).toBe("openai");
+      expect(wrapper.find('[data-testid="entry-model"]').text()).toBe("gpt-4o");
+      expect(wrapper.find('[data-testid="entry-variant-badge"]').text()).toBe("Spend");
     });
   });
 
-  describe("interaction", () => {
-    it('closes on backdrop click', async () => {
-      seedSnapshot({ provider: "anthropic", model: "claude-opus-4-7" });
-      const wrapper = mountModal(true);
-      await wrapper
-        .find('[data-testid="provider-quota-summary-backdrop"]')
-        .trigger("click");
-      expect(wrapper.emitted("close")).toHaveLength(1);
-    });
-
-    it('closes on X button click', async () => {
-      seedSnapshot({ provider: "anthropic", model: "claude-opus-4-7" });
-      const wrapper = mountModal(true);
-      await wrapper
-        .find('[data-testid="provider-quota-summary-close"]')
-        .trigger("click");
-      expect(wrapper.emitted("close")).toHaveLength(1);
-    });
-
-    it('emits "select" with the snapshot when a row is clicked', async () => {
-      seedSnapshot({
-        provider: "anthropic",
-        model: "claude-opus-4-7",
-        status: "healthy",
-        variant: "rate_limit",
-      });
-      const wrapper = mountModal(true);
-      const rows = wrapper.findAll('[data-testid="provider-quota-summary-row"]');
-      expect(rows).toHaveLength(1);
-      await rows[0].trigger("click");
-      expect(wrapper.emitted("select")).toHaveLength(1);
-      const payload = wrapper.emitted("select")?.[0]?.[0] as
-        | ProviderQuotaSnapshot
-        | undefined;
-      expect(payload).toBeDefined();
-      if (payload === undefined) return;
-      expect(payload.provider).toBe("anthropic");
-      expect(payload.model).toBe("claude-opus-4-7");
-      expect(payload.status).toBe("healthy");
-    });
-
-    it('closes the modal when the select listener is wired to close', async () => {
-      seedSnapshot({ provider: "anthropic", model: "claude-opus-4-7" });
-      const wrapper = mount(ProviderQuotaSummaryModal, {
-        props: { open: true },
-        global: {
-          stubs: { useFocusTrap: true },
-        },
-        attrs: {
-          "onSelect": () => wrapper.setProps({ open: false }),
-        },
-      });
-      const rows = wrapper.findAll('[data-testid="provider-quota-summary-row"]');
-      await rows[0].trigger("click");
+  describe("close behaviour", () => {
+    it('emits "close" on Escape keydown', async () => {
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
       await flushPromises();
-      expect(
-        wrapper.find('[data-testid="provider-quota-summary-backdrop"]').exists(),
-      ).toBe(false);
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      expect(wrapper.emitted("close")).toHaveLength(1);
+    });
+
+    it('emits "close" on backdrop click', async () => {
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      await wrapper.find('[data-testid="quota-summary-overlay"]').trigger("click");
+      expect(wrapper.emitted("close")).toHaveLength(1);
+    });
+
+    it('emits "close" on X button click', async () => {
+      const wrapper = mount(ProviderQuotaSummaryModal, { props: { open: true } });
+      await flushPromises();
+      await wrapper.find('[data-testid="quota-summary-close"]').trigger("click");
+      expect(wrapper.emitted("close")).toHaveLength(1);
     });
   });
 });
