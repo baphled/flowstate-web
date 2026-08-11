@@ -202,7 +202,9 @@ describe("sendSessionMessage", () => {
   // Defence-in-depth: a non-queue 202 (some intermediate proxy or a
   // future backend shape) must fall through to the normal turn_id/snapshot
   // normalisation instead of crashing or being misread as a queued result.
-  it("normalises a 202 without status queued to the turn shape", async () => {
+  it("treats any HTTP 202 as queued regardless of body fields (status code is authoritative)", async () => {
+    // The BE may return 202 without the `queued` boolean (omitempty on
+    // the Go side). The HTTP status code is the sole queue discriminant.
     const sessionPayload = {
       id: "sess-1",
       agentId: "agent-1",
@@ -218,7 +220,7 @@ describe("sendSessionMessage", () => {
       new Response(
         JSON.stringify({
           ...sessionPayload,
-          turn_id: "turn-202",
+          turn_id: "",
           snapshot: sessionPayload,
         }),
         { status: 202, headers: { "Content-Type": "application/json" } },
@@ -227,9 +229,7 @@ describe("sendSessionMessage", () => {
 
     const result = await sendSessionMessage("sess-1", "hello");
 
-    expect(result.queued).toBe(false);
-    if (result.queued) throw new Error("expected non-queued result");
-    expect(result.turnId).toBe("turn-202");
+    expect(result.queued).toBe(true);
   });
 });
 

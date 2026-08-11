@@ -334,10 +334,11 @@ export async function sendSessionMessage(
     prompt_id?: string;
     active_turn_id?: string;
   };
-  if (res.status === 202 && parsed.queued === true) {
-    // Per-session prompt queue — the BE is the single source of truth.
-    // Wire shape (server-authoritative, snake_case):
-    //   { queued: true, queue_position, prompt_id, active_turn_id, turn_id: "" }
+  if (res.status === 202) {
+    // Per-session prompt queue — HTTP 202 is the queue signal. The BE is
+    // the single source of truth. The `queued` boolean has omitempty on
+    // the Go side and may be absent; the status code is authoritative.
+    // Best-effort parse of snake_case fields when present.
     return {
       queued: true,
       sessionId: typeof parsed.session_id === "string" ? parsed.session_id : sessionId,
@@ -353,11 +354,7 @@ export async function sendSessionMessage(
           : undefined,
     };
   }
-  // A 202 that is not the queue shape is a contract violation — fall
-  // through to the normalisation below so the caller surfaces the
-  // server's body rather than silently mis-routing.
-  //
-  // Phase 2 wire shape:
+  // HTTP 200 — immediate dispatch. Phase 2 wire shape:
   //   {
   //     ...SessionResponse,        // legacy flat fields (id, agentId, messages, ...)
   //     turn_id: string,           // additive (empty string when feature off)
