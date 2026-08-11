@@ -225,6 +225,26 @@ test.describe("Chat view", () => {
         ]),
       });
     });
+    // Mock the turn endpoint so the page-load reattach
+    // (maybeReattachStream → pollTurnUntilTerminal) resolves cleanly
+    // instead of 404-ing. Returns completed so the poll exits fast.
+    await page.route("**/api/v1/sessions/**/turns/turn-1*", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          turn_id: "turn-1",
+          session_id: "session-12345678",
+          status: "completed",
+          started_at: "2026-05-01T09:59:00Z",
+          completed_at: "2026-05-01T10:00:00Z",
+          model: { provider: "mock", model: "mock" },
+          error: "",
+          messages: [],
+        }),
+      });
+    });
+
     await page.reload();
 
     const input = page.getByTestId("message-input");
@@ -350,10 +370,12 @@ test.describe("Chat view", () => {
           status: 202,
           contentType: "application/json",
           body: JSON.stringify({
-            status: "queued",
+            queued: true,
             session_id: sessionId,
-            promptId: "prompt-queued-1",
-            queuePosition: 1,
+            prompt_id: "prompt-queued-1",
+            queue_position: 1,
+            active_turn_id: "turn-1",
+            turn_id: "",
             content: body.content ?? "",
           }),
         });

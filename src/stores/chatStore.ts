@@ -570,7 +570,7 @@ export const useChatStore = defineStore('chat', {
     // blocked: an earlier message is still in flight"). The new contract
     // (backend-owned prompt queue, May 2026): submit-while-streaming
     // POSTs like any other prompt; the backend replies 202
-    // {status:"queued", session_id, queuePosition, promptId} instead of
+    // {queued:true, queue_position, prompt_id, active_turn_id} instead of
     // minting a turn. This record mirrors the backend's per-session queue
     // so the inline queued user bubbles (MessageBubble's
     // message-bubble--queued chrome) can surface the pending prompts with a

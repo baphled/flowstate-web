@@ -274,8 +274,8 @@ export class QueuedPromptNotFoundError extends Error {
  *                pre-Phase-2 server compatibility.
  *
  * Prompt-queue (per-session queue plan, May 2026): when the session is
- * already busy the POST returns 202 with {status:"queued", session_id,
- * queuePosition, promptId} instead of minting a turn. That wire shape is
+ * already busy the POST returns 202 with {queued:true, queue_position,
+ * prompt_id, active_turn_id} instead of minting a turn. That wire shape is
  * adapted to SendSessionMessageQueuedResult so the chat store branches
  * on `result.queued` to route the prompt into the backend-owned queue.
  *
