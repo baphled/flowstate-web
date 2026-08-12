@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import NavBar from "@/components/layout/NavBar.vue";
 import ToastContainer from "@/components/common/ToastContainer.vue";
 import LoadingOverlay from "@/components/common/LoadingOverlay.vue";
@@ -19,6 +19,20 @@ import { useChatStore } from "@/stores/chatStore";
 const appReady = ref(false);
 const apiOnline = ref(true);
 const chatStore = useChatStore();
+
+// Page title: keep the browser tab identifiable as the user switches
+// sessions. Watch the active session's title (the store's currentSession
+// getter is a pure derivation from currentSessionId) and reflect it in
+// document.title — "FlowState — <session title>" when a titled session
+// is active, plain "FlowState" otherwise. immediate: true so the title
+// is correct on first paint rather than waiting for a session change.
+watch(
+  () => chatStore.currentSession?.title,
+  (title) => {
+    document.title = title ? `FlowState — ${title}` : "FlowState";
+  },
+  { immediate: true },
+);
 
 // UI Parity PR6 N10 (May 2026) — min-duration gate.
 //

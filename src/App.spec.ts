@@ -273,3 +273,91 @@ describe("App loading overlay", () => {
     expect(document.getElementById("app-loading-splash")).toBeNull();
   });
 });
+
+describe("App page title", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    // Default: a healthy backend so the health-check resolves quickly.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true } as Response));
+    // index.html ships a static <title>FlowState</title>; each test starts
+    // from that baseline so title assertions are independent of ordering.
+    document.title = "FlowState";
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sets the page title to 'FlowState — <title>' when a titled session is active", async () => {
+    const chatStore = useChatStore();
+    chatStore.sessions = [
+      {
+        id: "s1",
+        agentId: "a",
+        title: "Debug the streaming loop",
+        createdAt: "",
+        updatedAt: "",
+        messageCount: 0,
+        status: "active",
+        depth: 0,
+        isStreaming: false,
+      },
+    ];
+    chatStore.currentSessionId = "s1";
+    vi.spyOn(chatStore, "bootstrap").mockResolvedValue(undefined);
+
+    mount(App, mountOptions);
+    await flushPromises();
+
+    expect(document.title).toBe("FlowState — Debug the streaming loop");
+
+    // Switching to another session reactively updates the title.
+    chatStore.sessions = [
+      ...chatStore.sessions,
+      {
+        id: "s2",
+        agentId: "a",
+        title: "Second session",
+        createdAt: "",
+        updatedAt: "",
+        messageCount: 0,
+        status: "active",
+        depth: 0,
+        isStreaming: false,
+      },
+    ];
+    chatStore.currentSessionId = "s2";
+    await flushPromises();
+
+    expect(document.title).toBe("FlowState — Second session");
+  });
+
+  it("falls back to the plain 'FlowState' title when no session is active or the title is empty", async () => {
+    const chatStore = useChatStore();
+    vi.spyOn(chatStore, "bootstrap").mockResolvedValue(undefined);
+
+    mount(App, mountOptions);
+    await flushPromises();
+
+    expect(document.title).toBe("FlowState");
+
+    // A session whose title is empty also keeps the baseline title.
+    chatStore.sessions = [
+      {
+        id: "s1",
+        agentId: "a",
+        title: "",
+        createdAt: "",
+        updatedAt: "",
+        messageCount: 0,
+        status: "active",
+        depth: 0,
+        isStreaming: false,
+      },
+    ];
+    chatStore.currentSessionId = "s1";
+    await flushPromises();
+
+    expect(document.title).toBe("FlowState");
+  });
+});
