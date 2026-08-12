@@ -6,15 +6,6 @@ import ToolBubble from "./ToolBubble.vue";
 import { resolveFileLang } from "@/lib/fileLang";
 import type { ToolRendererProps } from "./toolRendererProps";
 
-interface WriteLine {
-  number: number;
-  text: string;
-}
-
-// A "new file diff" with one or two lines reads as noise rather than value —
-// fall back to the plain <pre> for those bodies.
-const MIN_DIFF_LINES = 3;
-
 const props = withDefaults(defineProps<ToolRendererProps>(), {
   status: "completed",
 });
@@ -58,12 +49,6 @@ const bodyLines = computed<string[]>(() => {
   return props.body.split("\n");
 });
 
-const useDiffView = computed(() => bodyLines.value.length >= MIN_DIFF_LINES);
-
-const writeLines = computed<WriteLine[]>(() =>
-  bodyLines.value.map((text, i) => ({ number: i + 1, text })),
-);
-
 const writeFileLang = computed<string | undefined>(() =>
   resolveFileLang(filePath.value),
 );
@@ -82,13 +67,9 @@ const writeFileLang = computed<string | undefined>(() =>
         <span class="tool-renderer__label">Written content</span>
         <CopyButton :text="props.body" />
       </div>
-      <div
-        v-if="useDiffView"
-        class="tool-write-summary"
-        data-testid="write-summary"
-      >
+      <div class="tool-write-summary" data-testid="write-summary">
         <span class="tool-write-summary__added"
-          >+{{ writeLines.length }} lines written to {{ filePath }}</span
+          >+{{ bodyLines.length }} lines written to {{ filePath }}</span
         >
         <span
           v-if="isNewFile"
@@ -97,23 +78,12 @@ const writeFileLang = computed<string | undefined>(() =>
           >new file</span
         >
       </div>
-      <pre
-        v-if="useDiffView"
-        class="tool-code tool-code--write tool-code--lines"
-        data-component="write-content"
-      ><code><div
-          v-for="line in writeLines"
-          :key="line.number"
-          class="write-line"
-          data-testid="write-line"
-          :data-line-number="line.number"
-        ><span class="line-gutter">{{ line.number }}</span><span class="line-content"><span class="line-sign">+</span>{{ line.text }}</span></div></code></pre>
-      <div
-        v-else
-        class="tool-write-fallback"
-        data-component="write-content"
-      >
-        <HighlightedCode :code="props.body" :lang="writeFileLang" />
+      <div class="tool-write-content" data-component="write-content">
+        <HighlightedCode
+          :code="props.body"
+          :lang="writeFileLang"
+          max-height="none"
+        />
       </div>
     </div>
   </ToolBubble>
@@ -163,55 +133,5 @@ const writeFileLang = computed<string | undefined>(() =>
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-}
-
-.tool-code {
-  margin: 0;
-  padding: 0.85rem 1rem;
-  border: 1px solid var(--border, rgba(148, 163, 184, 0.25));
-  border-radius: calc(var(--radius, 12px) - 4px);
-  background: var(--surface-low, #1a1b26);
-  color: var(--text-primary, #c0caf5);
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
-  font-size: 0.85rem;
-  line-height: 1.5;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.tool-code--lines {
-  padding: 0.5rem 0;
-}
-
-.write-line {
-  display: grid;
-  grid-template-columns: 4ch 1fr;
-  gap: 0.5rem;
-  align-items: baseline;
-  padding: 0 0.5rem;
-  background: rgba(158, 206, 106, 0.08);
-  color: #9ece6a;
-  white-space: pre-wrap;
-}
-
-.line-gutter {
-  color: var(--text-muted, #565f89);
-  font-size: 0.7rem;
-  text-align: right;
-  user-select: none;
-}
-
-.line-content {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.line-sign {
-  color: #9ece6a;
-  font-weight: 700;
-  user-select: none;
 }
 </style>

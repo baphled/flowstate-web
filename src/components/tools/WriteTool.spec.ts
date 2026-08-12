@@ -73,7 +73,7 @@ describe("WriteTool", () => {
     expect(wrapper.find('[data-testid="copy-btn"]').exists()).toBe(true);
   });
 
-  it("renders written content as a new-file diff with + prefix, gutters and line numbers", () => {
+  it("renders written content through HighlightedCode with the language resolved from the file path", () => {
     const wrapper = mount(WriteTool, {
       props: {
         toolName: "write",
@@ -90,13 +90,12 @@ describe("WriteTool", () => {
       },
     });
 
-    const lines = wrapper.findAll('[data-testid="write-line"]');
-    expect(lines).toHaveLength(3);
-    expect(lines[0].attributes("data-line-number")).toBe("1");
-    expect(lines[2].attributes("data-line-number")).toBe("3");
-    expect(lines[0].text()).toContain("+");
-    expect(lines[0].text()).toContain("line one");
-    expect(lines[2].text()).toContain("line three");
+    const code = wrapper.get('[data-component="highlighted-code"]');
+    expect(code.attributes("data-lang")).toBe("typescript");
+    expect(code.text()).toContain("line one");
+    expect(code.text()).toContain("line two");
+    expect(code.text()).toContain("line three");
+    expect(wrapper.find('[data-component="write-content"]').exists()).toBe(true);
   });
 
   it("shows a summary with the written line count and file path", () => {
@@ -143,7 +142,7 @@ describe("WriteTool", () => {
     expect(summary.text()).toContain("new file");
   });
 
-  it("falls back to the plain pre when the body has fewer than 3 lines", () => {
+  it("renders tiny bodies through HighlightedCode with the resolved language", () => {
     const wrapper = mount(WriteTool, {
       props: {
         toolName: "write",
@@ -160,9 +159,31 @@ describe("WriteTool", () => {
       },
     });
 
-    expect(wrapper.find('[data-testid="write-line"]').exists()).toBe(false);
-    expect(wrapper.get('[data-component="write-content"]').text()).toContain(
-      "hi",
-    );
+    const code = wrapper.get('[data-component="highlighted-code"]');
+    expect(code.attributes("data-lang")).toBe("typescript");
+    expect(code.text()).toContain("hi");
+    expect(wrapper.find('[data-component="write-content"]').exists()).toBe(true);
+  });
+
+  it("does not resolve a grammar for paths without a supported extension", () => {
+    const wrapper = mount(WriteTool, {
+      props: {
+        toolName: "write",
+        heading: "/tmp/output.txt",
+        body: "hi",
+        status: "completed",
+      },
+      global: {
+        stubs: {
+          CopyButton,
+          HighlightedCode,
+          ToolBubble,
+        },
+      },
+    });
+
+    const code = wrapper.get('[data-component="highlighted-code"]');
+    expect(code.attributes("data-lang")).toBeUndefined();
+    expect(code.text()).toContain("hi");
   });
 });
