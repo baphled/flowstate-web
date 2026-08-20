@@ -219,13 +219,6 @@ export type Theme =
   | "dracula"
   | "nord";
 
-export interface ModelPreference {
-  provider: string;
-  model: string;
-}
-
-export type ModelPolicy = "permissive" | "strict" | "";
-
 export interface Agent {
   id: string;
   name: string;
@@ -238,20 +231,6 @@ export interface Agent {
     skills?: string[];
     tools?: string[];
   };
-  /**
-   * Provider/model pairs the agent is intended to run on. Order is
-   * significant — earlier entries are surfaced first by the picker.
-   * Mirrors agent.Manifest.PreferredModels on the Go side.
-   */
-  preferred_models?: ModelPreference[];
-  /**
-   * Controls how preferred_models is interpreted:
-   * - "" or "permissive": every model is allowed; preferred entries
-   *   are ranked first and badged.
-   * - "strict": only preferred entries are selectable; an empty list
-   *   degrades to permissive (avoids locking the user out).
-   */
-  model_policy?: ModelPolicy;
 }
 
 /**
