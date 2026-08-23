@@ -160,6 +160,30 @@ export interface SSEDelegationEvent {
   modelName?: string;
   /** Provider hosting the delegated agent (DelegationInfo.ProviderName). */
   providerName?: string;
+  // Swarm hierarchy (Aug 2026) — all optional, undefined on older backends.
+  swarmId?: string;
+  memberId?: string;
+  parentChain?: string;
+  depth?: number;
+  /** "agent" | "swarm" for nested sub-swarms. */
+  memberType?: string;
+  /** started | completed | failed lifecycle hint when the backend emits it. */
+  lifecycle?: string;
+}
+
+/**
+ * SSESwarmEvent — whole-swarm / sub-swarm lifecycle (Aug 2026).
+ * `type: "swarm"` with `status: started | completed | failed`.
+ * Hierarchy fields are optional so pre-hierarchy backends degrade.
+ */
+export interface SSESwarmEvent {
+  kind: "swarm";
+  status: string;
+  swarmId?: string;
+  memberId?: string;
+  parentChain?: string;
+  depth?: number;
+  memberType?: string;
 }
 
 export interface SSEHarnessRetryEvent {
@@ -506,6 +530,7 @@ export type SSEEvent =
   | SSEToolResultEvent
   | SSEToolErrorEvent
   | SSEDelegationEvent
+  | SSESwarmEvent
   | SSEHarnessRetryEvent
   | SSEHarnessAttemptStartEvent
   | SSEHarnessCompleteEvent
@@ -721,6 +746,58 @@ export function parseSSEPayload(payload: string): SSEEvent {
       providerName:
         typeof obj["provider_name"] === "string"
           ? (obj["provider_name"] as string)
+          : undefined,
+      // Swarm hierarchy (Aug 2026) — all optional, undefined on older
+      // backends. The UI degrades gracefully when absent.
+      swarmId:
+        typeof obj["swarm_id"] === "string"
+          ? (obj["swarm_id"] as string)
+          : undefined,
+      memberId:
+        typeof obj["member_id"] === "string"
+          ? (obj["member_id"] as string)
+          : undefined,
+      parentChain:
+        typeof obj["parent_chain"] === "string"
+          ? (obj["parent_chain"] as string)
+          : undefined,
+      depth: typeof obj["depth"] === "number" ? (obj["depth"] as number) : undefined,
+      memberType:
+        typeof obj["member_type"] === "string"
+          ? (obj["member_type"] as string)
+          : undefined,
+      lifecycle:
+        typeof obj["lifecycle"] === "string"
+          ? (obj["lifecycle"] as string)
+          : undefined,
+    };
+  }
+
+  // Swarm lifecycle event (Aug 2026) — the engine emits `type: "swarm"`
+  // with a `status` of started | completed | failed for the swarm (or a
+  // nested sub-swarm member) as a whole. Every field except status is
+  // optional; the store's run-tree treats absent hierarchy fields as
+  // "old backend" and falls back to coordination-key parsing.
+  if (type === "swarm") {
+    return {
+      kind: "swarm",
+      status: typeof obj["status"] === "string" ? (obj["status"] as string) : "",
+      swarmId:
+        typeof obj["swarm_id"] === "string"
+          ? (obj["swarm_id"] as string)
+          : undefined,
+      memberId:
+        typeof obj["member_id"] === "string"
+          ? (obj["member_id"] as string)
+          : undefined,
+      parentChain:
+        typeof obj["parent_chain"] === "string"
+          ? (obj["parent_chain"] as string)
+          : undefined,
+      depth: typeof obj["depth"] === "number" ? (obj["depth"] as number) : undefined,
+      memberType:
+        typeof obj["member_type"] === "string"
+          ? (obj["member_type"] as string)
           : undefined,
     };
   }
