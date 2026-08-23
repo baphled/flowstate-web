@@ -136,6 +136,37 @@ export const useSwarmStore = defineStore("swarm", () => {
     }, delay);
   }
 
+// Aug 2026 contract fix — the Go emitter (projectDelegationEvent /
+// projectSwarmLifecycleEvent in server.go) puts the hierarchy fields
+// (swarm_id, member_id, parent_chain, depth, member_type, lifecycle)
+// inside event.metadata on /api/swarm/events, while the run-tree reads
+// them as top-level fields. Promote them at ingest so the hierarchical
+// path fires against the real backend. Pure + idempotent: existing
+// top-level fields always win.
+const HIERARCHY_METADATA_KEYS = [
+  "swarm_id",
+  "member_id",
+  "parent_chain",
+  "depth",
+  "member_type",
+  "lifecycle",
+] as const;
+
+function promoteHierarchyFields(event: SwarmEvent): SwarmEvent {
+  if (!event.metadata) return event;
+  const promoted: Partial<SwarmEvent> = {};
+  for (const key of HIERARCHY_METADATA_KEYS) {
+    const value = event.metadata[key];
+    if (value === undefined || value === null) continue;
+    const existing = (event as unknown as Record<string, unknown>)[key];
+    if (existing === undefined || existing === null) {
+      (promoted as Record<string, unknown>)[key] = value;
+    }
+  }
+  if (Object.keys(promoted).length === 0) return event;
+  return { ...event, ...promoted };
+}
+
   function ingestEventLine(line: string): void {
     if (!line.startsWith("data: ")) {
       return;
@@ -147,8 +178,9 @@ export const useSwarmStore = defineStore("swarm", () => {
     }
 
     try {
-      const event = JSON.parse(data) as SwarmEvent;
-      if (typeof event.id !== "string") return;
+      const parsed = JSON.parse(data) as SwarmEvent;
+      if (typeof parsed.id !== "string") return;
+      const event = promoteHierarchyFields(parsed);
       const idx = events.value.findIndex((e) => e.id === event.id);
       if (idx >= 0) {
         events.value[idx] = event;
@@ -378,9 +410,14 @@ export const useSwarmStore = defineStore("swarm", () => {
           node.status = lifecycleToStatus(e.lifecycle, e.status);
         }
       }
-      // Attach gate verdicts.
+      // Attach gate verdicts. Two wire shapes: legacy type "gate_failed"
+      // and the streaming.EventGate projection — type "gate" with
+      // status "failed" (reason/gate_name in metadata).
       for (const e of events.value) {
-        if (e.type !== "gate_failed" || !e.member_id) continue;
+        const isGateFailure =
+          e.type === "gate_failed" ||
+          (e.type === "gate" && e.status === "failed");
+        if (!isGateFailure || !e.member_id) continue;
         const node = index.get(e.member_id);
         if (node) {
           node.gates.push({
@@ -442,6 +479,7 @@ export const useSwarmStore = defineStore("swarm", () => {
     connect,
     disconnect,
     clear,
+    ingestEventLine,
     eventCount,
     delegationEvents,
     harnessEvents,
