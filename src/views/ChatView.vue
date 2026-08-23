@@ -18,6 +18,7 @@ import CriticalErrorBanner from '@/components/chat/CriticalErrorBanner.vue'
 import MessageBubble from '@/components/chat/MessageBubble.vue'
 import MessageInput from '@/components/chat/MessageInput.vue'
 import TodoListPanel from '@/components/chat/TodoListPanel.vue'
+import SwarmRunTree from '@/components/swarm/SwarmRunTree.vue'
 import EmptyChatState from '@/components/chat/EmptyChatState.vue'
 import AgentPicker from '@/components/agent-picker/AgentPicker.vue'
 import ModelPicker from '@/components/model-picker/ModelPicker.vue'
@@ -861,6 +862,7 @@ onBeforeUnmount(() => {
     <aside v-if="showSwarmPane" class="chat-sidebar" :style="{ width: `${settingsStore.chatSidebarWidth}px` }" data-testid="swarm-pane">
       <div class="sidebar-panels">
         <TodoListPanel class="sidebar-panel" />
+        <SwarmRunTree class="sidebar-panel" />
       </div>
 
       <button
