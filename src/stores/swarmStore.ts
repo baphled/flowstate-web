@@ -10,6 +10,71 @@ const SWARM_RECONNECT_BASE_DELAY_MS = 2_000;
 const SWARM_RECONNECT_MAX_DELAY_MS = 30_000;
 const SWARM_RECONNECT_MAX_ATTEMPTS = 5;
 
+export type SwarmMemberStatus = "pending" | "running" | "done" | "failed";
+
+export interface SwarmTreeGate {
+  gateName: string;
+  reason: string;
+}
+
+export interface SwarmTreeNode {
+  key: string;
+  /** agent id or sub-swarm id */
+  id: string;
+  /** "agent" | "swarm" */
+  memberType: string;
+  status: SwarmMemberStatus;
+  gates: SwarmTreeGate[];
+  children: SwarmTreeNode[];
+}
+
+export interface SwarmRunTree {
+  swarmId: string;
+  members: SwarmTreeNode[];
+  /** True when built from the hierarchy-field path (vs key fallback). */
+  hierarchical: boolean;
+}
+
+
+function lifecycleToStatus(
+  lifecycle?: string,
+  status?: string,
+): SwarmMemberStatus {
+  const s = lifecycle ?? status ?? "";
+  if (
+    s === "started" ||
+    s === "start" ||
+    s === "running" ||
+    s === "progress"
+  ) {
+    return "running";
+  }
+  if (s === "completed" || s === "complete") return "done";
+  if (s === "failed" || s === "error") return "failed";
+  return "pending";
+}
+
+function findOrCreate(
+  root: Map<string, SwarmTreeNode>,
+  nodes: SwarmTreeNode[],
+  id: string,
+  memberType: string,
+): SwarmTreeNode {
+  const existing = root.get(id);
+  if (existing) return existing;
+  const node: SwarmTreeNode = {
+    key: id,
+    id,
+    memberType,
+    status: "pending",
+    gates: [],
+    children: [],
+  };
+  root.set(id, node);
+  nodes.push(node);
+  return node;
+}
+
 export const useSwarmStore = defineStore("swarm", () => {
   const events = ref<SwarmEvent[]>([]);
   const isLive = ref(false);
@@ -286,65 +351,6 @@ export const useSwarmStore = defineStore("swarm", () => {
   // Gate verdicts from gate_failed SwarmEvents (metadata carries the
   // SSEGateFailedEvent projection) attach to the matching member.
   // ---------------------------------------------------------------------
-
-  export type SwarmMemberStatus = "pending" | "running" | "done" | "failed";
-
-  export interface SwarmTreeGate {
-    gateName: string;
-    reason: string;
-  }
-
-  export interface SwarmTreeNode {
-    key: string;
-    /** agent id or sub-swarm id */
-    id: string;
-    /** "agent" | "swarm" */
-    memberType: string;
-    status: SwarmMemberStatus;
-    gates: SwarmTreeGate[];
-    children: SwarmTreeNode[];
-  }
-
-  export interface SwarmRunTree {
-    swarmId: string;
-    members: SwarmTreeNode[];
-    /** True when built from the hierarchy-field path (vs key fallback). */
-    hierarchical: boolean;
-  }
-
-  function lifecycleToStatus(
-    lifecycle?: string,
-    status?: string,
-  ): SwarmMemberStatus {
-    const s = lifecycle ?? status ?? "";
-    if (s === "started" || s === "start" || s === "running" || s === "progress") {
-      return "running";
-    }
-    if (s === "completed" || s === "complete") return "done";
-    if (s === "failed" || s === "error") return "failed";
-    return "pending";
-  }
-
-  function findOrCreate(
-    root: Map<string, SwarmTreeNode>,
-    nodes: SwarmTreeNode[],
-    id: string,
-    memberType: string,
-  ): SwarmTreeNode {
-    const existing = root.get(id);
-    if (existing) return existing;
-    const node: SwarmTreeNode = {
-      key: id,
-      id,
-      memberType,
-      status: "pending",
-      gates: [],
-      children: [],
-    };
-    root.set(id, node);
-    nodes.push(node);
-    return node;
-  }
 
   const runTree = computed<SwarmRunTree | null>(() => {
     const hierarchicalEvents = events.value.filter(
