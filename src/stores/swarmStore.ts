@@ -270,6 +270,165 @@ export const useSwarmStore = defineStore("swarm", () => {
     events.value.filter((e) => e.type === "review"),
   );
 
+  // ---------------------------------------------------------------------
+  // Run-tree (Aug 2026) — hierarchical swarm view.
+  //
+  // Primary path: events carrying the new hierarchy fields (swarm_id,
+  // member_id, parent_chain, depth, member_type, lifecycle) are grouped
+  // by swarm_id and nested via parent_chain/depth.
+  //
+  // Fallback path: when no event carries hierarchy fields (old backend),
+  // delegation events are nested by parsing chain-prefixed coordination
+  // keys from metadata.coord_store_keys / the event chain id itself
+  // (<parent>/<child>/<key> shape): each event's id chain nests under
+  // its parent-chain prefix.
+  //
+  // Gate verdicts from gate_failed SwarmEvents (metadata carries the
+  // SSEGateFailedEvent projection) attach to the matching member.
+  // ---------------------------------------------------------------------
+
+  export type SwarmMemberStatus = "pending" | "running" | "done" | "failed";
+
+  export interface SwarmTreeGate {
+    gateName: string;
+    reason: string;
+  }
+
+  export interface SwarmTreeNode {
+    key: string;
+    /** agent id or sub-swarm id */
+    id: string;
+    /** "agent" | "swarm" */
+    memberType: string;
+    status: SwarmMemberStatus;
+    gates: SwarmTreeGate[];
+    children: SwarmTreeNode[];
+  }
+
+  export interface SwarmRunTree {
+    swarmId: string;
+    members: SwarmTreeNode[];
+    /** True when built from the hierarchy-field path (vs key fallback). */
+    hierarchical: boolean;
+  }
+
+  function lifecycleToStatus(
+    lifecycle?: string,
+    status?: string,
+  ): SwarmMemberStatus {
+    const s = lifecycle ?? status ?? "";
+    if (s === "started" || s === "start" || s === "running" || s === "progress") {
+      return "running";
+    }
+    if (s === "completed" || s === "complete") return "done";
+    if (s === "failed" || s === "error") return "failed";
+    return "pending";
+  }
+
+  function findOrCreate(
+    root: Map<string, SwarmTreeNode>,
+    nodes: SwarmTreeNode[],
+    id: string,
+    memberType: string,
+  ): SwarmTreeNode {
+    const existing = root.get(id);
+    if (existing) return existing;
+    const node: SwarmTreeNode = {
+      key: id,
+      id,
+      memberType,
+      status: "pending",
+      gates: [],
+      children: [],
+    };
+    root.set(id, node);
+    nodes.push(node);
+    return node;
+  }
+
+  const runTree = computed<SwarmRunTree | null>(() => {
+    const hierarchicalEvents = events.value.filter(
+      (e) => typeof e.swarm_id === "string" && e.swarm_id !== "",
+    );
+
+    if (hierarchicalEvents.length > 0) {
+      // Group by swarm_id — the panel renders one tree per swarm; we
+      // surface the first (largest) swarm. Depth-sorted within parent.
+      const bySwarm = new Map<string, SwarmTreeNode[]>();
+      const index = new Map<string, SwarmTreeNode>();
+      for (const e of hierarchicalEvents) {
+        const swarmId = e.swarm_id!;
+        if (!bySwarm.has(swarmId)) bySwarm.set(swarmId, []);
+        const members = bySwarm.get(swarmId)!;
+        const parentId = e.parent_chain && e.parent_chain !== "" ? e.parent_chain : swarmId;
+        if (parentId !== swarmId) {
+          // nest under the parent node (member_id of parent chain tail)
+          const parentTail = parentId.split("/").pop() ?? parentId;
+          const parent = findOrCreate(index, members, parentTail, "agent");
+          const node = findOrCreate(index, parent.children, e.member_id ?? e.id, e.member_type ?? "agent");
+          node.status = lifecycleToStatus(e.lifecycle, e.status);
+        } else {
+          const node = findOrCreate(index, members, e.member_id ?? e.id, e.member_type ?? "agent");
+          node.status = lifecycleToStatus(e.lifecycle, e.status);
+        }
+      }
+      // Attach gate verdicts.
+      for (const e of events.value) {
+        if (e.type !== "gate_failed" || !e.member_id) continue;
+        const node = index.get(e.member_id);
+        if (node) {
+          node.gates.push({
+            gateName:
+              typeof e.metadata?.["gate_name"] === "string"
+                ? (e.metadata["gate_name"] as string)
+                : "gate",
+            reason:
+              typeof e.metadata?.["reason"] === "string"
+                ? (e.metadata["reason"] as string)
+                : "",
+          });
+          node.status = "failed";
+        }
+      }
+      const first = bySwarm.entries().next();
+      if (first.done) return null;
+      return {
+        swarmId: first.value[0],
+        members: first.value[1],
+        hierarchical: true,
+      };
+    }
+
+    // Fallback: chain-prefixed coordination keys (<parent>/<child>/<key>).
+    // Delegation event ids are chain ids; a chain whose id starts with
+    // "<parent>/" nests under the parent member.
+    const fallbackRoot: Map<string, SwarmTreeNode> = new Map();
+    const members: SwarmTreeNode[] = [];
+    for (const e of delegationEvents.value) {
+      const chain = e.id;
+      const parts = chain.split("/");
+      const memberId = parts[parts.length - 1];
+      const node = findOrCreate(fallbackRoot, members, memberId, "agent");
+      node.status = lifecycleToStatus(undefined, e.status);
+      if (parts.length > 1) {
+        const parentTail = parts[parts.length - 2];
+        const parent = findOrCreate(fallbackRoot, members, parentTail, "agent");
+        if (parent !== node && !parent.children.includes(node)) {
+          // Remove from root list if it was added there before nesting.
+          const rootIdx = members.indexOf(node);
+          if (rootIdx >= 0 && parts.length > 1) members.splice(rootIdx, 1);
+          parent.children.push(node);
+        }
+      }
+    }
+    if (members.length === 0) return null;
+    return {
+      swarmId: delegationEvents.value[0]?.agent_id ?? "swarm",
+      members,
+      hierarchical: false,
+    };
+  });
+
   return {
     events,
     isLive,
@@ -284,6 +443,7 @@ export const useSwarmStore = defineStore("swarm", () => {
     planEvents,
     statusEvents,
     reviewEvents,
+    runTree,
     reconnectAttempt,
   };
 });
