@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useSwarmStore } from "@/stores/swarmStore";
-import type { SwarmTreeNode } from "@/stores/swarmStore";
+import type {
+  SwarmRunTree as SwarmRunTreeT,
+  SwarmTreeNode,
+} from "@/stores/swarmStore";
 
 defineOptions({ name: "SwarmRunTree" });
 
@@ -64,7 +67,7 @@ const statusLabel: Record<string, string> = {
 
 // Coarse change signal for the watch — serialises id/status pairs.
 function serialize(
-  t: ReturnType<typeof swarmStore.runTree> | null,
+  t: SwarmRunTreeT | null,
 ): Array<{ id: string; status: string }> | null {
   if (!t) return null;
   const out: Array<{ id: string; status: string }> = [];

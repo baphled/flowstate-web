@@ -4069,6 +4069,11 @@ export const useChatStore = defineStore('chat', {
         case 'delegation':
           this.applyDelegationEvent(event)
           return
+        case 'swarm':
+          // Swarm lifecycle (Aug 2026) — consumed by the swarmStore's
+          // run-tree via the shared swarm event stream; no chat-side
+          // handling yet.
+          return
         case 'error':
           this.error = event.error
           return
