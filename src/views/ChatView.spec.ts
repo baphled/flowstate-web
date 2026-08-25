@@ -2012,3 +2012,75 @@ describe('ChatView swarm reattach on session-change (Bug-O)', () => {
     wrapper.unmount()
   })
 })
+
+// Session-URI T2/T4/T5 — route-param ↔ store binding in ChatView.
+import { createRouter, createMemoryHistory } from 'vue-router'
+
+async function makeSessionUriRouter(startPath: string) {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/chat', name: 'chat', component: ChatView },
+      { path: '/chat/s/:id', name: 'chat-session', component: ChatView },
+    ],
+  })
+  router.push(startPath)
+  await router.isReady()
+  return router
+}
+
+describe('ChatView session-URI binding', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('loads the session named by the /chat/s/:id route param on mount', async () => {
+    const chatStore = useChatStore()
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    chatStore.loadSessionMessages = loadSpy
+
+    const router = await makeSessionUriRouter('/chat/s/session-12345678')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(loadSpy).toHaveBeenCalledWith('session-12345678')
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-12345678')
+  })
+
+  it('does not double-load when currentSessionId already matches the route param', async () => {
+    const chatStore = useChatStore()
+    chatStore.currentSessionId = 'session-12345678'
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    chatStore.loadSessionMessages = loadSpy
+
+    const router = await makeSessionUriRouter('/chat/s/session-12345678')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(loadSpy).not.toHaveBeenCalled()
+  })
+
+  it('updates the URL when currentSessionId changes (lazy-create sync)', async () => {
+    const router = await makeSessionUriRouter('/chat')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const chatStore = useChatStore()
+    chatStore.currentSessionId = 'session-created-lazily'
+    await flushPromises()
+    await nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-created-lazily')
+  })
+
+  it('redirects to /chat when the session in the URL fails to load (unknown id)', async () => {
+    const chatStore = useChatStore()
+    chatStore.loadSessionMessages = vi.fn().mockRejectedValue(new Error('session_not_found'))
+
+    const router = await makeSessionUriRouter('/chat/s/session-doesnotexist')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/chat')
+  })
+})
