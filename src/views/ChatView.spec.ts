@@ -2084,3 +2084,26 @@ describe('ChatView session-URI binding', () => {
     expect(router.currentRoute.value.path).toBe('/chat')
   })
 })
+
+// Session-URI T4 — lazy-create on first send must land the new session
+// id in the URL once the store mints it.
+describe('ChatView lazy-create URL sync', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('replaces the URL with /chat/s/:id when sendMessage lazily creates a session', async () => {
+    const chatStore = useChatStore()
+    const router = await makeSessionUriRouter('/chat')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    // Simulate the lazy-create branch of sendMessage: currentSessionId
+    // flips from null to a freshly-minted id mid-send.
+    chatStore.currentSessionId = 'session-lazy-9999'
+    await flushPromises()
+    await nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-lazy-9999')
+  })
+})
