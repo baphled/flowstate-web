@@ -11,6 +11,12 @@ const router = createRouter({
   routes: [
     { path: "/", redirect: "/chat" },
     { path: "/chat", component: ChatView, name: "chat" },
+    // Session-URI feature — unique URL per session. `/chat/s/:id` keeps
+    // the chat family of routes together and avoids colliding with
+    // future top-level segments. Bare `/chat` remains the new/unsaved
+    // session view; deep links land on the same ChatView instance with
+    // the session id as a route param (bound to the store in ChatView).
+    { path: "/chat/s/:id", component: ChatView, name: "chat-session" },
     { path: "/swarm", component: SwarmView, name: "swarm" },
     { path: "/settings", component: SettingsView, name: "settings" },
     { path: "/agents/:id", component: AgentInfoView, name: "agent-info" },
