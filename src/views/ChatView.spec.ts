@@ -2107,3 +2107,28 @@ describe('ChatView lazy-create URL sync', () => {
     expect(router.currentRoute.value.path).toBe('/chat/s/session-lazy-9999')
   })
 })
+
+// Session-URI T5 — unknown session id in a deep-linked URL surfaces a
+// toast and bounces to /chat (extended contract beyond the bare
+// redirect already covered above).
+describe('ChatView unknown-session deep-link handling', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('shows an error toast when the deep-linked session id is unknown', async () => {
+    const toastMod = await import('@/composables/useToast')
+    const toastSpy = vi.spyOn(toastMod, 'showToast').mockImplementation(() => 0)
+
+    const chatStore = useChatStore()
+    chatStore.loadSessionMessages = vi.fn().mockRejectedValue(new Error('session_not_found'))
+
+    const router = await makeSessionUriRouter('/chat/s/session-ghost')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(toastSpy).toHaveBeenCalledWith(expect.objectContaining({ variant: 'error' }))
+    expect(router.currentRoute.value.path).toBe('/chat')
+    toastSpy.mockRestore()
+  })
+})
