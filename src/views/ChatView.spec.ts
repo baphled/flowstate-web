@@ -2073,6 +2073,29 @@ describe('ChatView session-URI binding', () => {
     expect(router.currentRoute.value.path).toBe('/chat/s/session-created-lazily')
   })
 
+  it('replaces the URL with /chat/s/:id when a delegation card click loads a child session', async () => {
+    const chatStore = useChatStore()
+    chatStore.bootstrapComplete = true
+    chatStore.chainSessions['chain-1'] = 'session-child-001'
+    chatStore.sessions = [
+      { id: 'session-child-001', agentId: 'executor', title: 'Delegated Run' },
+    ] as never
+    chatStore.loadSessionMessages = vi.fn(async (sessionId: string) => {
+      chatStore.currentSessionId = sessionId
+    })
+
+    const router = await makeSessionUriRouter('/chat')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const loaded = await chatStore.loadSessionForDelegation({ chainId: 'chain-1' })
+    expect(loaded).toBe(true)
+    await flushPromises()
+    await nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-child-001')
+  })
+
   it('redirects to /chat when the session in the URL fails to load (unknown id)', async () => {
     const chatStore = useChatStore()
     chatStore.loadSessionMessages = vi.fn().mockRejectedValue(new Error('session_not_found'))
