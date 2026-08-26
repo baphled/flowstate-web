@@ -412,9 +412,11 @@ describe('SessionSwitcher session-URI routing', () => {
     expect(router.currentRoute.value.path).toBe('/chat/s/parent-A')
   })
 
-  it('pushes /chat when New Session is chosen', async () => {
+  it('pushes /chat/s/:id when New Session is chosen', async () => {
     const chatStore = useChatStore()
-    chatStore.newSession = vi.fn().mockResolvedValue(undefined)
+    chatStore.newSession = vi.fn().mockImplementation(async () => {
+      chatStore.currentSessionId = 'session-fresh'
+    })
 
     const router = createRouter({
       history: createMemoryHistory(),
@@ -435,6 +437,6 @@ describe('SessionSwitcher session-URI routing', () => {
     await wrapper.findAll('[role="option"]').find((o) => o.text().includes('New Session'))!.trigger('click')
     await flushPromises()
 
-    expect(router.currentRoute.value.path).toBe('/chat')
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-fresh')
   })
 })

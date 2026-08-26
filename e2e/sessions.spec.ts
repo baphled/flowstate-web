@@ -232,4 +232,44 @@ test.describe("Session switching", () => {
 
     await expect(page).toHaveURL(/\/chat$/, { timeout: 10_000 });
   });
+
+  // Session-URI: creating a NEW session must land the URL on the new
+  // session's /chat/s/:id as soon as the backend returns the id (which
+  // happens synchronously inside newSession's createSession round-trip),
+  // not leave it on bare /chat.
+  test("creating a new session updates the URL to /chat/s/:id", async ({
+    page,
+  }) => {
+    // The beforeEach mock intercepts ALL **/api/v1/sessions requests
+    // with the list; override POST specifically so createSession gets a
+    // fresh session body while the list GET keeps returning the fixture.
+    await page.route("**/api/v1/sessions", async (route) => {
+      if (route.request().method() === "POST") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            id: "session-new-9999",
+            agentId: "planner",
+            title: "New Session",
+            updatedAt: "2026-05-01T12:00:00Z",
+            createdAt: "2026-05-01T12:00:00Z",
+            messageCount: 0,
+          }),
+        });
+      } else {
+        await route.fallback();
+      }
+    });
+
+    const sessionSwitcher = page.getByTestId("session-switcher");
+    await sessionSwitcher.getByRole("button").click();
+    await sessionSwitcher
+      .getByRole("option", { name: /New Session/i })
+      .click();
+
+    await expect(page).toHaveURL(/\/chat\/s\/session-new-9999$/, {
+      timeout: 10_000,
+    });
+  });
 });

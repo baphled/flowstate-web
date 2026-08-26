@@ -153,7 +153,16 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
 async function createNewSession(): Promise<void> {
   await chatStore.newSession()
   chatStore.clearMessages()
-  if (router) {
+  // Session-URI: newSession() resolves only after createSession returns,
+  // so currentSessionId is the fresh backend id here. Land the URL on
+  // /chat/s/<id> immediately — the old router.push('/chat') clobbered
+  // ChatView's store→route sync watcher and left the URL on bare /chat.
+  // The null branch only covers mocked/unit environments where the store
+  // action is stubbed without setting an id.
+  const newId = chatStore.currentSessionId
+  if (router && newId) {
+    await router.push(sessionRoutePath(newId))
+  } else if (router) {
     await router.push('/chat')
   }
   isOpen.value = false
