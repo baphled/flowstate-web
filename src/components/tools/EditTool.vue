@@ -194,11 +194,23 @@ function parseToolInputStrings(): {
     const parsed: unknown = JSON.parse(props.toolInput);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       const record = parsed as Record<string, unknown>;
-      if (
-        typeof record.oldString === "string" &&
+      // The backend edit tool's schema uses snake_case (`old_string` /
+      // `new_string`, internal/tool/edit/edit.go); camelCase covers other
+      // emitters. Both must be present as strings to win.
+      const oldString =
+        typeof record.oldString === "string"
+          ? record.oldString
+          : typeof record.old_string === "string"
+            ? record.old_string
+            : undefined;
+      const newString =
         typeof record.newString === "string"
-      ) {
-        return { oldString: record.oldString, newString: record.newString };
+          ? record.newString
+          : typeof record.new_string === "string"
+            ? record.new_string
+            : undefined;
+      if (oldString !== undefined && newString !== undefined) {
+        return { oldString, newString };
       }
     }
     return null;

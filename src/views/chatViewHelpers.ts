@@ -58,6 +58,16 @@ export function collapseToolPairs(messages: Message[]): Message[] {
         next.role === "tool_result" &&
         next.toolName === current.toolName
       ) {
+        // The paired tool_call is suppressed in favour of the result row,
+        // but on the persisted-history path it is the ONLY row carrying
+        // the invocation args (`toolInput`). Carry them onto the surviving
+        // result — as an immutable copy, never clobbering args the result
+        // already has — so renderers can resolve the full command, file
+        // path, and written contents (e.g. WriteTool's file body).
+        if (current.toolInput !== undefined && next.toolInput === undefined) {
+          out.push({ ...next, toolInput: current.toolInput });
+          i += 1; // the merged result row is consumed here
+        }
         continue;
       }
     }

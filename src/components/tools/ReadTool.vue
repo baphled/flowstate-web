@@ -35,14 +35,20 @@ function parseToolInput(raw: string | undefined): Record<string, unknown> {
   }
 }
 
-// The path comes from toolInput when present ({"file_path": "...", "limit":
-// ..., "offset": ...}); otherwise strip the leading "<toolName> " prefix off
-// the heading.
+// Candidate path arg keys, in priority order — the backend read tool's
+// schema uses `path` (internal/tool/read/read.go); the other aliases
+// cover the variants other emitters have used.
+const PATH_ARG_KEYS = ["filePath", "file_path", "file", "path"] as const;
+
+// The path comes from toolInput when present; otherwise strip the leading
+// "<toolName> " prefix off the heading.
 function resolveFilePath(): string {
   const input = parseToolInput(props.toolInput);
-  const fromInput = input.filePath ?? input.file_path;
-  if (typeof fromInput === "string" && fromInput !== "") {
-    return fromInput;
+  for (const key of PATH_ARG_KEYS) {
+    const fromInput = input[key];
+    if (typeof fromInput === "string" && fromInput !== "") {
+      return fromInput;
+    }
   }
   const prefix = `${props.toolName} `;
   return props.heading.startsWith(prefix)
@@ -197,7 +203,7 @@ function toggleShowFull(): void {
           v-if="isLongContent && !showFull"
           class="read-ellipsis"
           data-testid="read-ellipsis"
-        >… {{ hiddenLineCount }} lines hidden</div></code></pre>
+        >{{ hiddenLineCount }} lines hidden</div></code></pre>
       <button
         v-if="isLongContent"
         type="button"

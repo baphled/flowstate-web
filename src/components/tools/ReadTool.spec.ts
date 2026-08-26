@@ -180,6 +180,27 @@ describe("ReadTool", () => {
     expect(lines[1].attributes("data-line-number")).toBe("11");
   });
 
+  it("resolves the file path from the `path` and `file` arg keys", () => {
+    for (const key of ["path", "file"]) {
+      const wrapper = mount(ReadTool, {
+        props: {
+          toolName: "read",
+          heading: "read",
+          body: "one\ntwo",
+          status: "completed",
+          toolInput: JSON.stringify({ [key]: `/tmp/backend/${key}.ts` }),
+        },
+        global: {
+          stubs: { ToolBubble, CopyButton, HighlightedCode },
+        },
+      });
+
+      expect(wrapper.get('[data-testid="read-summary"]').text()).toContain(
+        `/tmp/backend/${key}.ts`,
+      );
+    }
+  });
+
   it("does not show line range label when neither limit nor offset is set", () => {
     const wrapper = mount(ReadTool, {
       props: {

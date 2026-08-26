@@ -119,6 +119,97 @@ describe("WriteTool", () => {
     expect(summary.text()).toContain("+4 lines written to /tmp/new.ts");
   });
 
+  it("renders the full written contents from the toolInput args, not the short result body", () => {
+    const lines = Array.from(
+      { length: 300 },
+      (_, i) => `written line ${i + 1}`,
+    );
+    const contents = lines.join("\n");
+    const wrapper = mount(WriteTool, {
+      props: {
+        toolName: "write",
+        heading: "write /tmp/new.ts",
+        body: "ok",
+        status: "completed",
+        toolInput: JSON.stringify({
+          filePath: "/tmp/new.ts",
+          content: contents,
+          exists: false,
+        }),
+      },
+      global: {
+        stubs: {
+          CopyButton,
+          HighlightedCode,
+          ToolBubble,
+        },
+      },
+    });
+
+    const code = wrapper.get('[data-component="highlighted-code"]');
+    // Full contents — first and last line both present, no "Show all"
+    // capping (WriteTool passes max-height="none").
+    expect(code.text()).toContain("written line 1");
+    expect(code.text()).toContain("written line 300");
+    // The confirmation body must not stand in for the file contents.
+    expect(code.text()).not.toContain("ok");
+    // The line count comes from the args contents, not the body.
+    expect(wrapper.get('[data-testid="write-summary"]').text()).toContain(
+      "+300 lines written to /tmp/new.ts",
+    );
+  });
+
+  it("resolves the file path from the `file`, `file_path`, and `path` arg keys", () => {
+    for (const key of ["file", "file_path", "path"]) {
+      const wrapper = mount(WriteTool, {
+        props: {
+          toolName: "write",
+          heading: "write",
+          body: "x",
+          status: "completed",
+          toolInput: JSON.stringify({
+            [key]: `/tmp/deep/nested/${key}.ts`,
+            content: "x",
+          }),
+        },
+        global: {
+          stubs: {
+            CopyButton,
+            HighlightedCode,
+            ToolBubble,
+          },
+        },
+      });
+
+      expect(wrapper.get('[data-testid="write-summary"]').text()).toContain(
+        `/tmp/deep/nested/${key}.ts`,
+      );
+    }
+  });
+
+  it("falls back to the result body when the args carry no content key", () => {
+    const wrapper = mount(WriteTool, {
+      props: {
+        toolName: "write",
+        heading: "write /tmp/echo.txt",
+        body: "echoed contents",
+        status: "completed",
+        toolInput: JSON.stringify({ filePath: "/tmp/echo.txt" }),
+      },
+      global: {
+        stubs: {
+          CopyButton,
+          HighlightedCode,
+          ToolBubble,
+        },
+      },
+    });
+
+    expect(wrapper.get('[data-component="highlighted-code"]').text()).toContain(
+      "echoed contents",
+    );
+  });
+
   it("shows a new file badge and resolves the path from toolInput when present", () => {
     const wrapper = mount(WriteTool, {
       props: {

@@ -23,13 +23,22 @@ function parseToolInput(raw: string | undefined): Record<string, unknown> {
   }
 }
 
+// Candidate path arg keys, in priority order — mirrors the alias list in
+// toolRenderSpec.ts primaryArgKeys so the summary line resolves the same
+// path the subtitle shows. The backend write tool's schema uses `path`
+// (internal/tool/write/write.go); the other aliases cover the variants
+// other emitters have used.
+const PATH_ARG_KEYS = ["filePath", "file_path", "file", "path"] as const;
+
 // The path comes from toolInput when present ({"filePath": "...", "exists":
 // false}); otherwise strip the leading "<toolName> " prefix off the heading.
 function resolveFilePath(): string {
   const input = parseToolInput(props.toolInput);
-  const fromInput = input.filePath ?? input.file_path;
-  if (typeof fromInput === "string" && fromInput !== "") {
-    return fromInput;
+  for (const key of PATH_ARG_KEYS) {
+    const fromInput = input[key];
+    if (typeof fromInput === "string" && fromInput !== "") {
+      return fromInput;
+    }
   }
   const prefix = `${props.toolName} `;
   return props.heading.startsWith(prefix)
@@ -39,14 +48,33 @@ function resolveFilePath(): string {
 
 const filePath = computed(() => resolveFilePath());
 
+// The written contents. The structured args are authoritative when they
+// carry a string `content`/`contents` key — the tool_result body is often
+// a short confirmation ("ok" / a summary line) rather than the file
+// itself. Otherwise fall back to the body (the backend-echo shape).
+function resolveWrittenContent(): string {
+  const input = parseToolInput(props.toolInput);
+  for (const key of ["content", "contents"] as const) {
+    if (key in input) {
+      const value = input[key];
+      if (typeof value === "string") {
+        return value;
+      }
+    }
+  }
+  return props.body;
+}
+
+const writtenContent = computed(() => resolveWrittenContent());
+
 const isNewFile = computed(() => {
   const input = parseToolInput(props.toolInput);
   return input.exists === false;
 });
 
 const bodyLines = computed<string[]>(() => {
-  if (!props.body) return [];
-  return props.body.split("\n");
+  if (!writtenContent.value) return [];
+  return writtenContent.value.split("\n");
 });
 
 const writeFileLang = computed<string | undefined>(() =>
@@ -65,7 +93,7 @@ const writeFileLang = computed<string | undefined>(() =>
     <div class="tool-renderer" data-component="write-tool">
       <div class="tool-renderer__header">
         <span class="tool-renderer__label">Written content</span>
-        <CopyButton :text="props.body" />
+        <CopyButton :text="writtenContent" />
       </div>
       <div class="tool-write-summary" data-testid="write-summary">
         <span class="tool-write-summary__added"
@@ -80,7 +108,7 @@ const writeFileLang = computed<string | undefined>(() =>
       </div>
       <div class="tool-write-content" data-component="write-content">
         <HighlightedCode
-          :code="props.body"
+          :code="writtenContent"
           :lang="writeFileLang"
           max-height="none"
         />

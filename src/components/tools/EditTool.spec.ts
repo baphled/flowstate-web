@@ -378,6 +378,35 @@ describe("EditTool", () => {
       );
     });
 
+    it("accepts snake_case old_string/new_string toolInput (backend schema)", () => {
+      const body = "";
+      const toolInput = JSON.stringify({
+        file: "/tmp/snake.go",
+        old_string: "a\nb",
+        new_string: "a\nb\nc",
+      });
+      const wrapper = mount(EditTool, {
+        props: {
+          toolName: "edit",
+          heading: "edit /tmp/snake.go",
+          body,
+          toolInput,
+          status: "completed",
+        },
+        global: { stubs: { CopyButton, ToolBubble } },
+      });
+
+      // Structured snake_case args synthesise the hunk (+1 added line)
+      // even when the body carries no replace statement.
+      const summary = wrapper.get('[data-testid="diff-summary"]');
+      expect(summary.get('[data-testid="diff-summary-added"]').text()).toBe(
+        "+1",
+      );
+      expect(wrapper.get('[data-testid="edit-hunk-header"]').text()).toContain(
+        "@@ -1,2 +1,3 @@",
+      );
+    });
+
     it("unescapes \\n and \\t escapes inside the quoted strings", () => {
       const body =
         'replaced "line one\\n\\tline two" with "line one\\n\\tline two\\nline three" in /tmp/test.go';

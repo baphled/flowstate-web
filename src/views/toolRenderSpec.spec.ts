@@ -43,6 +43,16 @@ describe("buildToolRenderSpec", () => {
     expect(buildToolRenderSpec(msg).heading).toBe("write /tmp/a.ts");
   });
 
+  it("uses the full path for write tool calls whose input uses the `file` key", () => {
+    const msg = makeToolMessage("tool_call", "write", {
+      file: "/tmp/deep/nested/out.ts",
+      content: "export {}",
+    });
+    const heading = buildToolRenderSpec(msg).heading;
+    expect(heading).toBe("write /tmp/deep/nested/out.ts");
+    expect(heading).not.toContain("{");
+  });
+
   it("uses filePath as the heading for read tool calls", () => {
     const msg = makeToolMessage("tool_call", "read", { filePath: "/tmp/b.ts" });
     expect(buildToolRenderSpec(msg).heading).toBe("read /tmp/b.ts");
@@ -51,6 +61,38 @@ describe("buildToolRenderSpec", () => {
   it("uses filePath as the heading for edit tool calls", () => {
     const msg = makeToolMessage("tool_call", "edit", { filePath: "/tmp/c.ts" });
     expect(buildToolRenderSpec(msg).heading).toBe("edit /tmp/c.ts");
+  });
+
+  it("uses the full path for edit tool calls whose input uses the `file` key", () => {
+    const msg = makeToolMessage("tool_call", "edit", {
+      file: "/tmp/deep/nested/path.ts",
+      oldString: "a",
+      newString: "b",
+    });
+    const heading = buildToolRenderSpec(msg).heading;
+    expect(heading).toBe("edit /tmp/deep/nested/path.ts");
+    expect(heading).not.toContain("{");
+  });
+
+  it("uses the full path for edit tool calls whose input uses the `file_path` key", () => {
+    const msg = makeToolMessage("tool_call", "edit", {
+      file_path: "/tmp/x.go",
+    });
+    expect(buildToolRenderSpec(msg).heading).toBe("edit /tmp/x.go");
+  });
+
+  it("uses the full path for read tool calls whose input uses the `file` key", () => {
+    const msg = makeToolMessage("tool_call", "read", { file: "/tmp/y.py" });
+    expect(buildToolRenderSpec(msg).heading).toBe("read /tmp/y.py");
+  });
+
+  it("does not truncate long resolved paths for edit tool calls", () => {
+    const longPath = "/" + "seg/".repeat(30) + "file.ts";
+    expect(longPath.length).toBeGreaterThan(80);
+    const msg = makeToolMessage("tool_call", "edit", { file: longPath });
+    const heading = buildToolRenderSpec(msg).heading;
+    expect(heading).toBe(`edit ${longPath}`);
+    expect(heading).not.toContain("...");
   });
 
   it("uses filePath as the heading for multiedit tool calls", () => {
@@ -192,15 +234,33 @@ describe("buildToolRenderSpec", () => {
     expect(buildToolRenderSpec(msg).heading).not.toContain("...");
   });
 
-  it("still caps the compact-JSON fallback blob at 80 characters with an ellipsis", () => {
+  it("renders the compact-JSON fallback blob in full without an ellipsis", () => {
     const msg = makeToolMessage("tool_call", "mcp_some_tool", {
       someLongKey: "x".repeat(200),
     });
     const spec = buildToolRenderSpec(msg);
     expect(spec.heading).toContain("mcp_some_tool {");
-    expect(spec.heading).toContain("...");
-    expect(spec.heading.length).toBeLessThan(
-      "mcp_some_tool ".length + 200,
+    // The full value is present — no cap, no ellipsis.
+    expect(spec.heading).toContain("x".repeat(200));
+    expect(spec.heading).not.toContain("...");
+  });
+
+  it("uses the full path for write tool calls whose input uses the backend `path` key", () => {
+    const msg = makeToolMessage("tool_call", "write", {
+      path: "/tmp/backend/write-target.ts",
+      content: "export {}",
+    });
+    const heading = buildToolRenderSpec(msg).heading;
+    expect(heading).toBe("write /tmp/backend/write-target.ts");
+    expect(heading).not.toContain("{");
+  });
+
+  it("uses the full path for read tool calls whose input uses the backend `path` key", () => {
+    const msg = makeToolMessage("tool_call", "read", {
+      path: "/tmp/backend/read-target.ts",
+    });
+    expect(buildToolRenderSpec(msg).heading).toBe(
+      "read /tmp/backend/read-target.ts",
     );
   });
 

@@ -78,6 +78,46 @@ describe("collapseToolPairs", () => {
     expect(result[0].toolName).toBe("write");
   });
 
+  it("carries the suppressed tool_call's toolInput onto the paired tool_result", () => {
+    const messages: Message[] = [
+      makeToolMessage("1", "tool_call", "write", {
+        toolInput: '{"filePath":"a.ts","content":"hi"}',
+      }),
+      makeToolMessage("2", "tool_result", "write", { content: "ok" }),
+    ];
+    const result = collapseToolPairs(messages);
+    expect(result).toHaveLength(1);
+    expect(result[0].role).toBe("tool_result");
+    expect(result[0].toolInput).toBe('{"filePath":"a.ts","content":"hi"}');
+    // Immutable merge — the original store row is untouched.
+    expect(messages[1].toolInput).toBeUndefined();
+  });
+
+  it("keeps the tool_result's own toolInput when it already has one", () => {
+    const messages: Message[] = [
+      makeToolMessage("1", "tool_call", "write", {
+        toolInput: '{"filePath":"a.ts"}',
+      }),
+      makeToolMessage("2", "tool_result", "write", {
+        content: "ok",
+        toolInput: '{"filePath":"b.ts"}',
+      }),
+    ];
+    const result = collapseToolPairs(messages);
+    expect(result).toHaveLength(1);
+    expect(result[0].toolInput).toBe('{"filePath":"b.ts"}');
+  });
+
+  it("collapses a pair without toolInput without altering the result row", () => {
+    const messages: Message[] = [
+      makeToolMessage("1", "tool_call", "bash"),
+      makeToolMessage("2", "tool_result", "bash", { content: "done" }),
+    ];
+    const result = collapseToolPairs(messages);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toBe(messages[1]); // same reference, nothing merged
+  });
+
   it("keeps a tool_call when no matching tool_result follows", () => {
     const messages: Message[] = [makeToolMessage("1", "tool_call", "write")];
     const result = collapseToolPairs(messages);

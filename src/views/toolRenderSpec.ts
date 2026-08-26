@@ -6,16 +6,23 @@ export interface ToolRenderSpec {
   body: string;
 }
 
-const primaryArgKeys: Record<string, string> = {
-  bash: "command",
-  read: "filePath",
-  write: "filePath",
-  edit: "filePath",
-  multiedit: "filePath",
-  apply_patch: "filePath",
-  glob: "pattern",
-  grep: "pattern",
-  skill_load: "name",
+// Candidate primary-arg keys per tool, in priority order. The backend
+// tools disagree on the path key (internal/tool/{write,read} use `path`,
+// edit uses `file`, multiedit uses `file_path`) — so every file tool
+// accepts all four aliases and the first non-empty string wins. glob and
+// grep keep `pattern` primary: their `path` arg is a base directory, not
+// the display value. Without an alias match the heading falls through to
+// the compact-JSON blob instead of showing the path.
+const primaryArgKeys: Record<string, readonly string[]> = {
+  bash: ["command"],
+  read: ["filePath", "file_path", "file", "path"],
+  write: ["filePath", "file_path", "file", "path"],
+  edit: ["filePath", "file_path", "file", "path"],
+  multiedit: ["filePath", "file_path", "file", "path"],
+  apply_patch: ["filePath", "file_path", "file", "path"],
+  glob: ["pattern"],
+  grep: ["pattern"],
+  skill_load: ["name"],
 };
 
 // preferredFallbackKeys mirrors the Go-side priority list in
@@ -47,19 +54,6 @@ const sensitiveKeySubstrings = [
 ];
 
 const redactedPlaceholder = "[REDACTED]";
-
-// truncateLen caps the compact-JSON fallback blob only. Tool titles show
-// the full command/path for every tool; only the compact-JSON fallback
-// blob keeps a cap so MCP tools with huge JSON blobs cannot blow up the
-// card.
-const truncateLen = 80;
-
-function truncate(s: string): string {
-  if (s.length <= truncateLen) {
-    return s;
-  }
-  return s.slice(0, truncateLen) + "...";
-}
 
 function isSensitiveKey(key: string): boolean {
   const lower = key.toLowerCase();
@@ -113,20 +107,24 @@ function compactJSONFallback(args: Record<string, unknown>): string | null {
   if (parts.length === 0) {
     return null;
   }
+  // Rendered in full — never ellipsized. The subtitle wraps
+  // (overflow-wrap: anywhere in ToolBubble) so long blobs stay readable
+  // and no information is silently dropped.
   const rendered = `{${parts.join(",")}}`;
-  const capped = truncate(rendered);
-  return capped === "" ? null : capped;
+  return rendered === "" ? null : rendered;
 }
 
 function resolvePrimaryValue(
   toolName: string,
   args: Record<string, unknown>,
 ): string | null {
-  const primary = primaryArgKeys[toolName];
-  if (primary) {
-    const raw = args[primary];
-    if (typeof raw === "string" && raw !== "") {
-      return redactIfSensitive(primary, raw);
+  const primaryKeys = primaryArgKeys[toolName];
+  if (primaryKeys) {
+    for (const key of primaryKeys) {
+      const raw = args[key];
+      if (typeof raw === "string" && raw !== "") {
+        return redactIfSensitive(key, raw);
+      }
     }
   }
 
