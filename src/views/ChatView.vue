@@ -83,6 +83,12 @@ watch(
   () => chatStore.currentSessionId,
   (sessionId) => {
     if (!sessionId) return
+    // Bootstrap gate: while initial hydration (restoreStateFromBackend)
+    // is still in flight, currentSessionId can transiently flip as the
+    // restore resolves the persisted session. Pushing those transient
+    // values into the URL would clobber a route-param session load
+    // (/chat/s/:id direct nav / reload). Skip until bootstrap settles.
+    if (!chatStore.bootstrapComplete) return
     // Only react to store-driven session changes that the URL doesn't
     // already reflect (the route → store watcher above sets the store,
     // which would echo here; the equality check prevents an infinite

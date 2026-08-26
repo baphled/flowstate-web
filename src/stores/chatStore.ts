@@ -997,6 +997,15 @@ export const useChatStore = defineStore('chat', {
     //
     // Transient — never persisted, never hydrated from the backend.
     bootstrapPromise: null as Promise<void> | null,
+    // bootstrapComplete — flips to true in bootstrap()'s .finally() so
+    // route-sync watchers (ChatView's store→route push) can suppress
+    // navigation while initial hydration is still in flight. Without
+    // this gate, restoreStateFromBackend can transiently reset
+    // currentSessionId mid-bootstrap and the watcher would push the
+    // stale id into the URL, clobbering a route-param session load
+    // (/chat/s/:id direct nav / reload).
+    // Transient — never persisted, never hydrated from the backend.
+    bootstrapComplete: false,
     // UI Parity PR6 — Collapse all / Expand all override (May 2026).
     //
     // Per-card open state lives in ToolBubble's local isOpen ref. The
@@ -1466,7 +1475,12 @@ export const useChatStore = defineStore('chat', {
       if (this.bootstrapPromise) {
         return this.bootstrapPromise
       }
-      this.bootstrapPromise = this.restoreStateFromBackend()
+      this.bootstrapPromise = this.restoreStateFromBackend().finally(() => {
+        // Settle the gate regardless of outcome — a failed bootstrap must
+        // not leave route-sync watchers suppressed forever (the user can
+        // still navigate; the error toast path in ChatView handles UX).
+        this.bootstrapComplete = true
+      })
       return this.bootstrapPromise
     },
 
