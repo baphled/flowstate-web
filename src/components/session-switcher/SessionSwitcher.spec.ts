@@ -5,6 +5,22 @@ import { nextTick } from 'vue'
 import SessionSwitcher from './SessionSwitcher.vue'
 import { useChatStore } from '@/stores/chatStore'
 import type { SessionSummary } from '@/types'
+import { createRouter, createMemoryHistory } from 'vue-router'
+
+// Session-URI T3 — the store persists session ids to localStorage; jsdom
+// in this spec file lacks a full implementation for the key the store
+// reads, so provide a minimal shim before the store module evaluates.
+if (typeof window !== 'undefined' && !window.localStorage.getItem) {
+  Object.defineProperty(window, 'localStorage', {
+    value: {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+      clear: () => {},
+    },
+    configurable: true,
+  })
+}
 
 vi.mock('@/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api')>()
@@ -358,5 +374,67 @@ describe('SessionSwitcher Cmd+K fuzzy palette (I3)', () => {
     expect(loadSpy).toHaveBeenCalledWith('root-B')
     expect(wrapper.find('[data-testid="session-palette-modal"]').exists()).toBe(false)
     wrapper.unmount()
+  })
+})
+
+// Session-URI T3 — selecting a session must push the /chat/s/:id route
+// (URL as source of truth), not only mutate the store.
+describe('SessionSwitcher session-URI routing', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('pushes /chat/s/:id when a session option is selected', async () => {
+    const chatStore = useChatStore()
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/chat', name: 'chat', component: { template: '<div />' } },
+        { path: '/chat/s/:id', name: 'chat-session', component: { template: '<div />' } },
+      ],
+    })
+    router.push('/chat')
+    await router.isReady()
+
+    const wrapper = mount(SessionSwitcher, { global: { plugins: [router] } })
+    await flushPromises()
+
+    await wrapper.find('[aria-haspopup="listbox"]').trigger('click')
+    await flushPromises()
+
+    chatStore.sessions = [makeSession({ id: 'parent-A', title: 'Alpha' })]
+    await nextTick()
+
+    await wrapper.findAll('[role="option"]').find((o) => o.text().includes('Alpha'))!.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/parent-A')
+  })
+
+  it('pushes /chat when New Session is chosen', async () => {
+    const chatStore = useChatStore()
+    chatStore.newSession = vi.fn().mockResolvedValue(undefined)
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/chat', name: 'chat', component: { template: '<div />' } },
+        { path: '/chat/s/:id', name: 'chat-session', component: { template: '<div />' } },
+      ],
+    })
+    router.push('/chat/s/session-old')
+    await router.isReady()
+
+    const wrapper = mount(SessionSwitcher, { global: { plugins: [router] } })
+    await flushPromises()
+
+    await wrapper.find('[aria-haspopup="listbox"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.findAll('[role="option"]').find((o) => o.text().includes('New Session'))!.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/chat')
   })
 })

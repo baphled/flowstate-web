@@ -80,12 +80,15 @@ test.describe("Session switching", () => {
 
     await page.route("**/api/v1/sessions/**/messages", async (route) => {
       const sessionId = getSessionId(route.request().url());
+      const messages =
+        messagesBySession[sessionId as keyof typeof messagesBySession];
+      // Unknown session ids must 404 — the ChatView route watcher's
+      // catch branch redirects /chat/s/:unknown back to /chat, and a
+      // 200-with-empty-array fallback would mask that redirect path.
       await route.fulfill({
-        status: 200,
+        status: messages ? 200 : 404,
         contentType: "application/json",
-        body: JSON.stringify(
-          messagesBySession[sessionId as keyof typeof messagesBySession] ?? [],
-        ),
+        body: JSON.stringify(messages ?? { error: "session not found" }),
       });
     });
 
@@ -145,9 +148,9 @@ test.describe("Session switching", () => {
       .getByRole("option", { name: /Sprint Retro/i })
       .click();
 
-    await expect(sessionSwitcher.getByRole("button")).toContainText(
-      /Sprint Retro/,
-    );
+    await expect(
+      sessionSwitcher.locator("button.session-switcher-trigger"),
+    ).toContainText(/Sprint Retro/);
     await expect(messageList).toContainText(
       "Sprint Retro summary from the API.",
     );
@@ -168,5 +171,65 @@ test.describe("Session switching", () => {
       sessionSwitcher.getByRole("option", { name: /New Session/i }),
     ).toBeVisible();
     await expect(sessionSwitcher.getByRole("option")).toHaveCount(4);
+  });
+
+  // Session-URI feature — deep-link + reload-persistence contract.
+  // NOTE: these tests must stay INSIDE the describe block — the
+  // beforeEach route mocks only apply within it; outside, requests hit
+  // the real backend.
+  test("direct navigation to /chat/s/:id loads that session's messages", async ({
+    page,
+  }) => {
+    // The beforeEach already visited /chat (which ran bootstrap and
+    // localStorage restore). Navigating from there exercises the
+    // in-app route change rather than a cold deep-link — the reload
+    // test below covers the cold path.
+    await page.goto("/chat/s/session-87654321");
+
+    const messageList = page.getByTestId("message-list");
+    await expect(messageList).toContainText("How did the sprint go?", {
+      timeout: 10_000,
+    });
+    await expect(page).toHaveURL(/\/chat\/s\/session-87654321$/);
+  });
+
+  test("switching sessions updates the URL to /chat/s/:id", async ({
+    page,
+  }) => {
+    const sessionSwitcher = page.getByTestId("session-switcher");
+
+    await sessionSwitcher.getByRole("button").click();
+    await sessionSwitcher
+      .getByRole("option", { name: /Sprint Retro/i })
+      .click();
+
+    await expect(page).toHaveURL(/\/chat\/s\/session-87654321$/);
+    await expect(page.getByTestId("message-list")).toContainText(
+      "Sprint Retro summary from the API.",
+    );
+  });
+
+  test("reloading a /chat/s/:id URL preserves the session", async ({
+    page,
+  }) => {
+    await page.goto("/chat/s/session-12345678");
+    await expect(page.getByTestId("message-list")).toContainText(
+      "Planning Sync summary from the API.",
+      { timeout: 10_000 },
+    );
+
+    await page.reload();
+
+    await expect(page.getByTestId("message-list")).toContainText(
+      "Planning Sync summary from the API.",
+      { timeout: 10_000 },
+    );
+    await expect(page).toHaveURL(/\/chat\/s\/session-12345678$/);
+  });
+
+  test("an unknown session id redirects to /chat", async ({ page }) => {
+    await page.goto("/chat/s/session-doesnotexist");
+
+    await expect(page).toHaveURL(/\/chat$/, { timeout: 10_000 });
   });
 });

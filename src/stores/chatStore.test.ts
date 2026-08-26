@@ -10313,3 +10313,90 @@ describe('chatStore - live session-bleed bug bundle (May 2026)', () => {
     expect(store.lastHeartbeatAtBySession['session-new']).toBeUndefined()
   })
 })
+
+describe('chatStore - bootstrapComplete gate', () => {
+  beforeEach(() => {
+    installLocalStorageStub()
+    vi.clearAllMocks()
+    setActivePinia(createPinia())
+  })
+
+  it('bootstrapComplete is false before bootstrap() settles', () => {
+    const store = useChatStore()
+    expect(store.bootstrapComplete).toBe(false)
+  })
+
+  it('bootstrapComplete flips to true after bootstrap() resolves', async () => {
+    const store = useChatStore()
+    await store.bootstrap()
+    expect(store.bootstrapComplete).toBe(true)
+  })
+
+  it('bootstrapComplete flips to true even when bootstrap() rejects', async () => {
+    vi.mocked(fetchSessions).mockRejectedValueOnce(new Error('boom'))
+    const store = useChatStore()
+    await expect(store.bootstrap()).rejects.toThrow('boom')
+    expect(store.bootstrapComplete).toBe(true)
+  })
+
+  it('bootstrap() is a singleton — second call reuses the same promise and does not double-fetch', async () => {
+    const store = useChatStore()
+    const p1 = store.bootstrap()
+    const p2 = store.bootstrap()
+    await Promise.all([p1, p2])
+    expect(vi.mocked(fetchAgents)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(fetchSessions)).toHaveBeenCalledTimes(1)
+  })
+
+  it('a route-param session load survives bootstrap: currentSessionId is not clobbered by restoreStateFromBackend', async () => {
+    // Simulate ChatView's mount order: the route→store watcher fires
+    // loadSessionMessages('session-2') BEFORE bootstrap's
+    // restoreStateFromBackend settles. localStorage has a different
+    // persisted session ('session-1') from a previous page-load, so
+    // an unguarded restore would clobber currentSessionId back to
+    // session-1. The fix: restoreStateFromBackend must not overwrite
+    // a currentSessionId that was set after the store was created
+    // (i.e. by a route-param load racing bootstrap).
+    window.localStorage.setItem('chat.currentSessionId', 'session-1')
+
+    vi.mocked(fetchSessions).mockResolvedValueOnce([
+      {
+        id: 'session-1',
+        agentId: 'agent-1',
+        title: 'Session 1',
+        createdAt: '',
+        updatedAt: '',
+        messageCount: 0,
+        status: 'active',
+        depth: 0,
+        isStreaming: false,
+      },
+      {
+        id: 'session-2',
+        agentId: 'agent-1',
+        title: 'Session 2',
+        createdAt: '',
+        updatedAt: '',
+        messageCount: 0,
+        status: 'active',
+        depth: 0,
+        isStreaming: false,
+      },
+    ])
+
+    const store = useChatStore()
+
+    // Route watcher wins the race: loads session-2 while bootstrap is
+    // still in flight. Kick bootstrap off but do not await.
+    const bootstrapPromise = store.bootstrap()
+    // Simulate the route watcher firing mid-bootstrap (after bootstrap
+    // started, before it settles).
+    const loadPromise = store.loadSessionMessages('session-2')
+
+    await Promise.all([bootstrapPromise, loadPromise])
+
+    // The route-param session must survive: restoreStateFromBackend
+    // must not clobber it back to the persisted session-1.
+    expect(store.currentSessionId).toBe('session-2')
+  })
+})

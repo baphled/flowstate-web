@@ -2012,3 +2012,146 @@ describe('ChatView swarm reattach on session-change (Bug-O)', () => {
     wrapper.unmount()
   })
 })
+
+// Session-URI T2/T4/T5 — route-param ↔ store binding in ChatView.
+import { createRouter, createMemoryHistory } from 'vue-router'
+
+async function makeSessionUriRouter(startPath: string) {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/chat', name: 'chat', component: ChatView },
+      { path: '/chat/s/:id', name: 'chat-session', component: ChatView },
+    ],
+  })
+  router.push(startPath)
+  await router.isReady()
+  return router
+}
+
+describe('ChatView session-URI binding', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('loads the session named by the /chat/s/:id route param on mount', async () => {
+    const chatStore = useChatStore()
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    chatStore.loadSessionMessages = loadSpy
+
+    const router = await makeSessionUriRouter('/chat/s/session-12345678')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(loadSpy).toHaveBeenCalledWith('session-12345678')
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-12345678')
+  })
+
+  it('does not double-load when currentSessionId already matches the route param', async () => {
+    const chatStore = useChatStore()
+    chatStore.currentSessionId = 'session-12345678'
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    chatStore.loadSessionMessages = loadSpy
+
+    const router = await makeSessionUriRouter('/chat/s/session-12345678')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(loadSpy).not.toHaveBeenCalled()
+  })
+
+  it('updates the URL when currentSessionId changes (lazy-create sync)', async () => {
+    const router = await makeSessionUriRouter('/chat')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const chatStore = useChatStore()
+    chatStore.currentSessionId = 'session-created-lazily'
+    await flushPromises()
+    await nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-created-lazily')
+  })
+
+  it('replaces the URL with /chat/s/:id when a delegation card click loads a child session', async () => {
+    const chatStore = useChatStore()
+    chatStore.bootstrapComplete = true
+    chatStore.chainSessions['chain-1'] = 'session-child-001'
+    chatStore.sessions = [
+      { id: 'session-child-001', agentId: 'executor', title: 'Delegated Run' },
+    ] as never
+    chatStore.loadSessionMessages = vi.fn(async (sessionId: string) => {
+      chatStore.currentSessionId = sessionId
+    })
+
+    const router = await makeSessionUriRouter('/chat')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const loaded = await chatStore.loadSessionForDelegation({ chainId: 'chain-1' })
+    expect(loaded).toBe(true)
+    await flushPromises()
+    await nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-child-001')
+  })
+
+  it('redirects to /chat when the session in the URL fails to load (unknown id)', async () => {
+    const chatStore = useChatStore()
+    chatStore.loadSessionMessages = vi.fn().mockRejectedValue(new Error('session_not_found'))
+
+    const router = await makeSessionUriRouter('/chat/s/session-doesnotexist')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/chat')
+  })
+})
+
+// Session-URI T4 — lazy-create on first send must land the new session
+// id in the URL once the store mints it.
+describe('ChatView lazy-create URL sync', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('replaces the URL with /chat/s/:id when sendMessage lazily creates a session', async () => {
+    const chatStore = useChatStore()
+    const router = await makeSessionUriRouter('/chat')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    // Simulate the lazy-create branch of sendMessage: currentSessionId
+    // flips from null to a freshly-minted id mid-send.
+    chatStore.currentSessionId = 'session-lazy-9999'
+    await flushPromises()
+    await nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-lazy-9999')
+  })
+})
+
+// Session-URI T5 — unknown session id in a deep-linked URL surfaces a
+// toast and bounces to /chat (extended contract beyond the bare
+// redirect already covered above).
+describe('ChatView unknown-session deep-link handling', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('shows an error toast when the deep-linked session id is unknown', async () => {
+    const toastMod = await import('@/composables/useToast')
+    const toastSpy = vi.spyOn(toastMod, 'showToast').mockImplementation(() => 0)
+
+    const chatStore = useChatStore()
+    chatStore.loadSessionMessages = vi.fn().mockRejectedValue(new Error('session_not_found'))
+
+    const router = await makeSessionUriRouter('/chat/s/session-ghost')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(toastSpy).toHaveBeenCalledWith(expect.objectContaining({ variant: 'error' }))
+    expect(router.currentRoute.value.path).toBe('/chat')
+    toastSpy.mockRestore()
+  })
+})
