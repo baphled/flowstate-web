@@ -741,3 +741,226 @@ describe("swarmStore.connect — Bug-O per-view session reattach", () => {
     await Promise.all([p1, p2, p3]);
   });
 });
+
+describe("swarmStore.runTree — hierarchy, fallback, lifecycle, gates", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  function hierarchyEvent(overrides: Record<string, unknown>) {
+    return {
+      id: "evt",
+      type: "delegation",
+      timestamp: "2026-08-23T00:00:00Z",
+      agent_id: "lead",
+      ...overrides,
+    };
+  }
+
+  it("builds a hierarchical tree when swarm_id fields are present", () => {
+    const swarm = useSwarmStore();
+    swarm.events = [
+      hierarchyEvent({
+        id: "e1",
+        swarm_id: "swarm-a",
+        member_id: "Senior-Engineer",
+        member_type: "agent",
+        lifecycle: "completed",
+      }),
+      hierarchyEvent({
+        id: "e2",
+        swarm_id: "swarm-a",
+        member_id: "bug-hunt",
+        parent_chain: "swarm-a",
+        member_type: "swarm",
+        lifecycle: "started",
+      }),
+      hierarchyEvent({
+        id: "e3",
+        swarm_id: "swarm-a",
+        member_id: "explorer",
+        parent_chain: "swarm-a/bug-hunt",
+        member_type: "agent",
+        lifecycle: "started",
+      }),
+    ] as never;
+
+    const tree = swarm.runTree;
+    expect(tree).not.toBeNull();
+    expect(tree!.hierarchical).toBe(true);
+    expect(tree!.swarmId).toBe("swarm-a");
+    const subSwarm = tree!.members.find((m) => m.id === "bug-hunt");
+    expect(subSwarm).toBeDefined();
+    expect(subSwarm!.memberType).toBe("swarm");
+    expect(subSwarm!.status).toBe("running");
+    const nested = subSwarm!.children.find((c) => c.id === "explorer");
+    expect(nested).toBeDefined();
+    expect(nested!.status).toBe("running");
+  });
+
+  it("falls back to chain-prefixed keys when hierarchy fields are absent", () => {
+    const swarm = useSwarmStore();
+    swarm.events = [
+      hierarchyEvent({ id: "lead/worker-a", status: "start" }),
+      hierarchyEvent({ id: "lead/worker-b", status: "complete" }),
+    ] as never;
+
+    const tree = swarm.runTree;
+    expect(tree).not.toBeNull();
+    expect(tree!.hierarchical).toBe(false);
+    const lead = tree!.members.find((m) => m.id === "lead");
+    expect(lead).toBeDefined();
+    expect(lead!.children.map((c) => c.id).sort()).toEqual([
+      "worker-a",
+      "worker-b",
+    ]);
+    expect(lead!.children.find((c) => c.id === "worker-b")!.status).toBe(
+      "done",
+    );
+  });
+
+  it("maps lifecycle transitions and gate verdicts onto members", () => {
+    const swarm = useSwarmStore();
+    swarm.events = [
+      hierarchyEvent({
+        id: "e1",
+        swarm_id: "swarm-a",
+        member_id: "explorer",
+        member_type: "agent",
+        lifecycle: "started",
+      }),
+      hierarchyEvent({
+        id: "e2",
+        type: "gate_failed",
+        swarm_id: "swarm-a",
+        member_id: "explorer",
+        metadata: { gate_name: "result-schema", reason: "bad shape" },
+      }),
+      hierarchyEvent({
+        id: "e3",
+        swarm_id: "swarm-a",
+        member_id: "writer",
+        member_type: "agent",
+        lifecycle: "failed",
+      }),
+      hierarchyEvent({
+        id: "e4",
+        swarm_id: "swarm-a",
+        member_id: "reviewer",
+        member_type: "agent",
+        lifecycle: "completed",
+      }),
+    ] as never;
+
+    const tree = swarm.runTree!;
+    const explorer = tree.members.find((m) => m.id === "explorer")!;
+    // Gate failure marks the member failed and attaches the verdict.
+    expect(explorer.status).toBe("failed");
+    expect(explorer.gates).toHaveLength(1);
+    expect(explorer.gates[0].gateName).toBe("result-schema");
+    expect(tree.members.find((m) => m.id === "writer")!.status).toBe("failed");
+    expect(tree.members.find((m) => m.id === "reviewer")!.status).toBe("done");
+  });
+
+  it("returns null when there are no tree-bearing events", () => {
+    const swarm = useSwarmStore();
+    swarm.events = [];
+    expect(swarm.runTree).toBeNull();
+  });
+
+  // FIX 1 — wire shape: the Go backend (projectDelegationEvent /
+  // projectSwarmLifecycleEvent) emits hierarchy fields INSIDE metadata on
+  // /api/swarm/events. ingestEventLine must promote them to top level so
+  // the hierarchical run-tree path fires against the real backend.
+  it("promotes hierarchy fields from metadata on ingest and nests the run-tree", () => {
+    const swarm = useSwarmStore();
+    swarm.ingestEventLine(
+      `data: ${JSON.stringify({
+        id: "chain-1",
+        type: "delegation",
+        timestamp: "2026-08-23T00:00:00Z",
+        agent_id: "lead",
+        metadata: {
+          swarm_id: "swarm-a",
+          member_id: "bug-hunt",
+          parent_chain: "swarm-a",
+          depth: 1,
+          member_type: "swarm",
+        },
+      })}`,
+    );
+    swarm.ingestEventLine(
+      `data: ${JSON.stringify({
+        id: "chain-2",
+        type: "delegation",
+        timestamp: "2026-08-23T00:00:01Z",
+        agent_id: "lead",
+        metadata: {
+          swarm_id: "swarm-a",
+          member_id: "explorer",
+          parent_chain: "swarm-a/bug-hunt",
+          depth: 2,
+          member_type: "agent",
+          lifecycle: "started",
+        },
+      })}`,
+    );
+
+    expect(swarm.runTree).not.toBeNull();
+    expect(swarm.runTree!.hierarchical).toBe(true);
+    const subSwarm = swarm.runTree!.members.find((m) => m.id === "bug-hunt");
+    expect(subSwarm).toBeDefined();
+    expect(subSwarm!.memberType).toBe("swarm");
+    const nested = subSwarm!.children.find((c) => c.id === "explorer");
+    expect(nested).toBeDefined();
+    expect(nested!.status).toBe("running");
+  });
+
+  it("keeps existing top-level hierarchy fields untouched (idempotent)", () => {
+    const swarm = useSwarmStore();
+    swarm.ingestEventLine(
+      `data: ${JSON.stringify({
+        id: "chain-1",
+        type: "delegation",
+        timestamp: "2026-08-23T00:00:00Z",
+        agent_id: "lead",
+        swarm_id: "swarm-top",
+        member_id: "solo",
+        member_type: "agent",
+        lifecycle: "completed",
+        metadata: { swarm_id: "should-not-override" },
+      })}`,
+    );
+    expect(swarm.runTree!.swarmId).toBe("swarm-top");
+  });
+
+  // FIX 2 — the swarm stream emits type:"gate" with status:"failed"
+  // (streaming.EventGate), not type:"gate_failed".
+  it("attaches gate verdicts from type:'gate' status:'failed' events", () => {
+    const swarm = useSwarmStore();
+    swarm.events = [
+      hierarchyEvent({
+        id: "e1",
+        swarm_id: "swarm-a",
+        member_id: "explorer",
+        member_type: "agent",
+        lifecycle: "started",
+      }),
+      hierarchyEvent({
+        id: "e2",
+        type: "gate",
+        status: "failed",
+        swarm_id: "swarm-a",
+        member_id: "explorer",
+        metadata: { gate_name: "result-schema", reason: "bad shape" },
+      }),
+    ] as never;
+
+    const tree = swarm.runTree!;
+    const explorer = tree.members.find((m) => m.id === "explorer")!;
+    expect(explorer.status).toBe("failed");
+    expect(explorer.gates).toHaveLength(1);
+    expect(explorer.gates[0].gateName).toBe("result-schema");
+    expect(explorer.gates[0].reason).toBe("bad shape");
+  });
+});

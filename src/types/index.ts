@@ -194,6 +194,23 @@ export interface SwarmEvent {
   agent_id: string;
   metadata?: Record<string, unknown>;
   schema_version?: number;
+  /**
+   * Swarm hierarchy fields (Aug 2026). All optional — the UI must degrade
+   * gracefully against older backends that never emit them (the run-tree
+   * falls back to parsing chain-prefixed coordination keys).
+   */
+  swarm_id?: string;
+  member_id?: string;
+  parent_chain?: string;
+  /** Nesting depth: 0 = root swarm. */
+  depth?: number;
+  /** "agent" for a member agent, "swarm" for a nested sub-swarm. */
+  member_type?: string;
+  /**
+   * Lifecycle status for a member/swarm as observed on the event:
+   * started | completed | failed. Absent on pre-hierarchy backends.
+   */
+  lifecycle?: string;
 }
 
 export interface HealthResponse {

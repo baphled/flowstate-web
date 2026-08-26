@@ -8,8 +8,9 @@ import { test, expect } from "@playwright/test";
 // AgentInfoView and forcing them to manually navigate back via `Chat`.
 //
 // The acceptance contract this spec pins:
-//   1. Clicking the delegation card MUST keep the URL on `/chat` (no
-//      `/agents/:id` navigation).
+//   1. Clicking the delegation card MUST NOT route to `/agents/:id`
+//      (AgentInfoView); the URL becomes the session-URI form
+//      `/chat/s/<child-id>` via ChatView's currentSessionId watcher.
 //   2. The chat view MUST stay mounted (no AgentInfoView render).
 //   3. The chat store MUST load the delegated session (here keyed on the
 //      target agent id, matching MessageBubble.loadDelegatedSession).
@@ -148,15 +149,17 @@ test.describe("Delegation card navigation", () => {
     // not a router-link to /agents/executor (which used to land on the
     // AgentInfoView). We assert the affordance type explicitly so the
     // contract regresses loudly if anyone re-introduces a router-link.
-    const card = page.getByTestId("delegation-agent-link").first();
+    const card = page.getByTestId("delegation-completed-agent-link").first();
     await expect(card).toBeVisible();
     await expect(card).toHaveText("executor");
     expect(await card.evaluate((el) => el.tagName)).toBe("BUTTON");
 
     await card.click();
 
-    // URL stays on /chat — the bug surfaced as `/agents/executor`.
-    await expect(page).toHaveURL(/\/chat$/);
+    // URL becomes the session-URI form for the loaded child session —
+    // the delegation-driven store change syncs the URL so the child is
+    // shareable/deep-linkable. The old bug surfaced as `/agents/executor`.
+    await expect(page).toHaveURL(/\/chat\/s\/session-child-001$/);
 
     // AgentInfoView must NOT have been rendered.
     await expect(page.getByTestId("agent-info-view")).toHaveCount(0);
@@ -306,7 +309,7 @@ test.describe("Delegation card navigation", () => {
     });
     await page.goto("/chat");
 
-    const card = page.getByTestId("delegation-agent-link").first();
+    const card = page.getByTestId("delegation-completed-agent-link").first();
     await expect(card).toBeVisible();
     await card.click();
 
@@ -438,7 +441,7 @@ test.describe("Delegation card navigation", () => {
       "ACTIVE SESSION A USER MESSAGE (stay here).",
     );
 
-    const card = page.getByTestId("delegation-agent-link").first();
+    const card = page.getByTestId("delegation-completed-agent-link").first();
     await expect(card).toBeVisible();
     await card.click();
 
@@ -450,7 +453,22 @@ test.describe("Delegation card navigation", () => {
     await expect(messageList).not.toContainText(
       "UNRELATED SESSION B REPLY (do not jump here).",
     );
-    // URL stays on /chat — no navigation side-effect either.
+    // URL stays on /chat — no navigation side-effect either (the click
+    // fell through every resolver without a session load).
     await expect(page).toHaveURL(/\/chat$/);
+  });
+
+  test("URL reflects the delegated child session after a card click (session-URI sync)", async ({
+    page,
+  }) => {
+    // Pins the store → route direction of the session-URI feature: a
+    // delegation click lands the resolved child session id in the URL as
+    // /chat/s/<id> so the delegated thread is shareable/deep-linkable.
+    const card = page.getByTestId("delegation-completed-agent-link").first();
+    await expect(card).toBeVisible();
+    await card.click();
+
+    await expect(page).toHaveURL(/\/chat\/s\/session-child-001$/);
+    await expect(page.getByTestId("agent-info-view")).toHaveCount(0);
   });
 });
