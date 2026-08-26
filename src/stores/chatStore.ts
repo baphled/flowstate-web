@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import type { Agent, Message, Model, QueuedPromptEntry, Session, SessionSummary, Swarm } from '@/types'
 import {
   cancelQueuedPrompt as apiCancelQueuedPrompt,
+  cancelTurn as apiCancelTurn,
   compactSessionNow,
   createSession,
   deleteSession as apiDeleteSession,
@@ -3889,17 +3890,30 @@ export const useChatStore = defineStore('chat', {
         }
         this.escapePressCount = 0
 
-        // Phase-4-Commit-2 of "Turn-Based Post-Then-Poll Architecture
-        // (May 2026)" retired the DELETE /api/v1/sessions/{id}/stream
-        // cancel endpoint along with the SSE handler that owned it.
-        // A server-side DELETE /api/v1/sessions/{id}/turns/{turn_id}
-        // cancel endpoint is a follow-on (tracked separately). For
-        // now Escape-Escape clears the per-session UI gate immediately
-        // so the composer flips back to Send; the long-poll itself
-        // continues until the engine drains, and any chunks that
-        // arrive land on a now-cleared streaming slot (no user-visible
-        // re-render). The Turn registry's terminal state still resolves
-        // correctly when the engine completes.
+        // Server-side cancel (Session Cancel, Aug 2026): DELETE
+        // /api/v1/sessions/{id}/turns/{turn_id} so the engine actually
+        // stops — the backend registry marks the turn terminal
+        // 'cancelled' and aborts the run instead of draining to
+        // natural completion. The long-poll loop exits on ANY terminal
+        // snapshot (status !== 'running'), so it stops riding the turn
+        // and the post-poll reconcile renders whatever the backend
+        // persisted — a fully-stopped session instead of a cosmetic
+        // UI clear while tokens keep burning.
+        //
+        // Fire-and-forget: the UI gate clears unconditionally so the
+        // composer flips back to Send even if the DELETE fails or the
+        // turn id isn't known yet (pre-turn loading window — the
+        // POST hasn't resolved a turn id, nothing to cancel
+        // server-side).
+        const turnId = this.lastPollTurnIdBySession[sessionId]
+        if (turnId) {
+          apiCancelTurn(sessionId, turnId).catch((err) => {
+            // A failed cancel leaves the turn to complete naturally;
+            // the poll loop still resolves it terminal and the
+            // reconcile renders the final state. Log for diagnosis.
+            console.warn('Failed to cancel turn server-side', err)
+          })
+        }
         this.setSessionStreaming(sessionId, { isLoading: false, isStreaming: false })
       }
     },

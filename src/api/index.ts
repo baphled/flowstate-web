@@ -415,6 +415,44 @@ export async function cancelQueuedPrompt(
 }
 
 /**
+ * cancelTurn cancels an in-flight turn server-side via
+ * DELETE /api/v1/sessions/{id}/turns/{turn_id} (Session Cancel, Aug
+ * 2026). The backend registry marks the turn terminal 'cancelled' and
+ * aborts the engine run; the FE long-poll loop exits on the terminal
+ * snapshot the same way it exits on 'completed'/'failed' (any status
+ * !== 'running' is terminal), so polling stops riding the turn instead
+ * of draining to natural completion.
+ *
+ * Responses:
+ *   - 200             → the TurnState snapshot: 'cancelled' if the turn
+ *                       was running, the pre-existing terminal state if
+ *                       it had already resolved (idempotent — repeat
+ *                       cancels are safe).
+ *   - 404             → throws (unknown turn id; caller may treat as
+ *                       already-gone / skip).
+ *   - other non-2xx   → throws Error(parseError).
+ */
+export async function cancelTurn(
+  sessionId: string,
+  turnId: string,
+): Promise<TurnState> {
+  const res = await fetch(
+    joinBaseURL(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`,
+    ),
+    {
+      method: "DELETE",
+      headers: withCsrfHeader(undefined),
+      credentials: CREDENTIALS_INCLUDE,
+    },
+  );
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+  return (await res.json()) as TurnState;
+}
+
+/**
  * TurnState is the wire shape returned by
  * GET /api/v1/sessions/{session_id}/turns/{turn_id}. Mirrors the Go
  * `turnResponse` struct in internal/api/server.go.
@@ -440,7 +478,7 @@ export interface TurnStateModel {
 export interface TurnState {
   turn_id: string;
   session_id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   started_at: string;
   completed_at: string | null;
   duration_ms?: number;

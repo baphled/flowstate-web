@@ -21,6 +21,7 @@ function installLocalStorageStub(): void {
   Object.defineProperty(window, 'localStorage', { value: stub, configurable: true })
 }
 import {
+  cancelTurn,
   compactSessionNow,
   cancelQueuedPrompt,
   createSession,
@@ -203,6 +204,22 @@ vi.mock('../api', () => ({
   // for the idempotent-404 branch.
   cancelQueuedPrompt: vi.fn((_sessionId: string, _promptId: string) =>
     Promise.resolve({ status: 'cancelled' }),
+  ),
+  // Session Cancel (Aug 2026) — DELETE /sessions/{sid}/turns/{tid}
+  // seam for the Escape-Escape / Stop-button cancel cascade. Default
+  // mock resolves with a cancelled TurnState snapshot; tests override
+  // with mockRejectedValueOnce to exercise the fire-and-forget path.
+  cancelTurn: vi.fn((sessionId: string, turnId: string) =>
+    Promise.resolve({
+      turn_id: turnId,
+      session_id: sessionId,
+      status: 'cancelled',
+      started_at: '',
+      completed_at: '',
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [],
+    }),
   ),
   // Backend-owned prompt queue (May 2026) — typed errors the store
   // branches on with instanceof. Must be real classes (not plain
@@ -9893,6 +9910,10 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
   it('clears the session-streaming gate when Escape-Escape fires during the loading-but-not-yet-streaming window', async () => {
     const store = useChatStore()
     store.currentSessionId = 'session-pre-stream'
+    // The POST has resolved and the long-poll has armed, so the turn id
+    // is already registered (chatStore.ts:2702 sets it before the first
+    // fetchTurn). The DELETE cancel must fire against it.
+    store.lastPollTurnIdBySession['session-pre-stream'] = 'turn-pre-stream'
 
     // Reproduce the exact pre-stream window: sendMessage has set
     // isLoading=true (chatStore.ts:2589) but no chunk has arrived yet
@@ -9910,6 +9931,11 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
     const slot = store.sessionStreaming['session-pre-stream']
     expect(slot?.isLoading).toBe(false)
     expect(slot?.isStreaming).toBe(false)
+
+    // Session Cancel (Aug 2026): the confirmed chord now fires the
+    // server-side DELETE so the engine stops — no more cosmetic-only
+    // UI clear while the turn drains to natural completion.
+    expect(vi.mocked(cancelTurn)).toHaveBeenCalledWith('session-pre-stream', 'turn-pre-stream')
   })
 
   it('still cancels during the chunk-arriving window (regression guard for the existing happy-path)', async () => {
@@ -9918,6 +9944,7 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
     // narrow it.
     const store = useChatStore()
     store.currentSessionId = 'session-streaming'
+    store.lastPollTurnIdBySession['session-streaming'] = 'turn-streaming'
     store.setSessionStreaming('session-streaming', { isLoading: true, isStreaming: true })
 
     await store.handleEscapeKey()
@@ -9926,6 +9953,7 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
     const slot = store.sessionStreaming['session-streaming']
     expect(slot?.isLoading).toBe(false)
     expect(slot?.isStreaming).toBe(false)
+    expect(vi.mocked(cancelTurn)).toHaveBeenCalledWith('session-streaming', 'turn-streaming')
   })
 
   it('does NOT cancel when neither isLoading nor isStreaming is true (no spurious clears on an idle session)', async () => {
@@ -9946,6 +9974,9 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
 
     const after = store.sessionStreaming['session-idle']
     expect(after).toBe(before)
+    // The gate returns before the cancel branch — no server DELETE
+    // fires for an idle session.
+    expect(vi.mocked(cancelTurn)).not.toHaveBeenCalled()
   })
 })
 
