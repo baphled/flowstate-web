@@ -12,6 +12,7 @@ import {
   fetchSessions,
   fetchSwarms,
   fetchTurn,
+  answerQuestion as apiAnswerQuestion,
   grantPermission as apiGrantPermission,
   sendSessionMessage,
   truncateSessionMessages,
@@ -24,6 +25,7 @@ import {
   type SendSessionMessageQueuedResult,
   type TurnState,
   type TurnStatePermissionRequest,
+  type TurnStateQuestionRequest,
 } from '@/api'
 import { recordStreamEvent } from '@/lib/streamLog'
 import { exhaustivenessGuard, parseSSEPayload, type SSEDelegationEvent, type SSEEvent } from '@/lib/sseEvent'
@@ -515,6 +517,16 @@ export const useChatStore = defineStore('chat', {
     // only ever read it via .has() in the component; Pinia handles
     // the reactivity through the action-write boundary.
     grantingPermissionRequests: new Set<string>(),
+    // Question Tool (Aug 2026) — mirror of pendingPermissionRequests
+    // for blocking clarifying questions. Keyed by request_id; the
+    // poll-diff in pollTurnUntilTerminal inserts pending entries and
+    // removes answered/timeout/absent ones. QuestionPrompt reads
+    // entries from this record.
+    pendingQuestions: {} as Record<string, TurnStateQuestionRequest>,
+    // Companion set of question request_ids currently in the
+    // optimistic "Submitting…" state — cleared by the diff (success)
+    // or the POST's failure branch (retry).
+    answeringQuestionRequests: new Set<string>(),
     // chainSessions — Bug Hunt (May 2026) sibling-confusion fix for the
     // in-thread delegation card.
     //
@@ -1898,6 +1910,29 @@ export const useChatStore = defineStore('chat', {
     },
 
     /**
+     * Question Tool (Aug 2026) — the operator's submission of an
+     * inline QuestionPrompt answer. Mirrors grantPermission: marks the
+     * request in-flight ("Submitting…" state), POSTs the answers to
+     * /question-answer, and clears the optimistic flag on failure
+     * (re-throw so the prompt can surface a retry affordance).
+     * Removal from pendingQuestions happens in the long-poll diff
+     * when the answered status flips — the cross-tab guarantee.
+     */
+    async answerQuestion(requestId: string, answers: string[]): Promise<void> {
+      const sessionId = this.currentSessionId
+      if (!sessionId) {
+        return
+      }
+      this.answeringQuestionRequests.add(requestId)
+      try {
+        await apiAnswerQuestion(sessionId, requestId, answers)
+      } catch (error) {
+        this.answeringQuestionRequests.delete(requestId)
+        throw error
+      }
+    },
+
+    /**
      * Permission Modes (May 2026) — Slice 3 hydration helper.
      *
      * Adopt the per-session mode using the canonical precedence:
@@ -3269,6 +3304,39 @@ export const useChatStore = defineStore('chat', {
               delete this.pendingPermissionRequests[knownId]
               if (this.grantingPermissionRequests.has(knownId)) {
                 this.grantingPermissionRequests.delete(knownId)
+              }
+            }
+          }
+        }
+
+        // Question Tool (Aug 2026) — diff question_requests against the
+        // prior poll's pending entries, mirroring the permission_requests
+        // diff above. pending → insert into pendingQuestions (the
+        // QuestionPrompt component renders inline); answered/timeout →
+        // remove + clear the Submitting… flag; entries absent from the
+        // server's slice are removed as a forward-compat hedge.
+        const incomingQuestions = state.question_requests
+        if (Array.isArray(incomingQuestions)) {
+          const seenQuestionIds = new Set<string>()
+          for (const entry of incomingQuestions) {
+            if (!entry?.request_id) continue
+            seenQuestionIds.add(entry.request_id)
+            if (entry.status === 'pending') {
+              this.pendingQuestions[entry.request_id] = entry
+            } else {
+              if (this.pendingQuestions[entry.request_id]) {
+                delete this.pendingQuestions[entry.request_id]
+              }
+              if (this.answeringQuestionRequests.has(entry.request_id)) {
+                this.answeringQuestionRequests.delete(entry.request_id)
+              }
+            }
+          }
+          for (const knownId of Object.keys(this.pendingQuestions)) {
+            if (!seenQuestionIds.has(knownId)) {
+              delete this.pendingQuestions[knownId]
+              if (this.answeringQuestionRequests.has(knownId)) {
+                this.answeringQuestionRequests.delete(knownId)
               }
             }
           }

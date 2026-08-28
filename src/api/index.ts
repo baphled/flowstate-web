@@ -615,6 +615,26 @@ export interface TurnState {
    * unchanged.
    */
   permission_requests?: TurnStatePermissionRequest[];
+  /**
+   * question_requests surfaces the in-flight + recently-resolved
+   * blocking clarifying-question requests for this Turn (Question
+   * Tool, Aug 2026 — mirrors permission_requests §17.1). Populated
+   * by the subscribeTurnQuestions bus subscribers in
+   * internal/api/server.go.
+   *
+   * Two-phase wire lifecycle:
+   *   - status === 'pending' — engine goroutine suspended in the
+   *     question tool; FE renders QuestionPrompt anchored to the
+   *     owning tool_call bubble.
+   *   - status === 'answered' | 'timeout' — resolved. All tabs
+   *     observe via the long-poll diff; chatStore removes the entry
+   *     from pendingQuestions.
+   *
+   * Optional: servers without WithQuestionRegistry and Turns with
+   * no question events omit the field entirely — the FE's diff
+   * treats absent === unchanged.
+   */
+  question_requests?: TurnStateQuestionRequest[];
 }
 
 /**
@@ -643,6 +663,17 @@ export interface TurnStatePermissionRequest {
   mode?: string;
   status: "pending" | "granted" | "denied" | "timeout";
   scope?: string;
+}
+
+export interface TurnStateQuestionRequest {
+  request_id: string;
+  tool_name: string;
+  agent_name?: string;
+  question: string;
+  options?: string[];
+  allow_multiple?: boolean;
+  status: "pending" | "answered" | "timeout";
+  answers?: string[];
 }
 
 /**
@@ -1076,6 +1107,28 @@ export async function grantPermission(
     throw new Error(await parseError(res));
   }
   return (await res.json()) as { request_id: string; scope: string };
+}
+
+export async function answerQuestion(
+  sessionId: string,
+  requestId: string,
+  answers: string[],
+): Promise<{ request_id: string; status: string }> {
+  const res = await fetch(
+    joinBaseURL(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/question-answer`,
+    ),
+    {
+      method: "POST",
+      headers: withCsrfHeader({ "Content-Type": "application/json" }),
+      credentials: CREDENTIALS_INCLUDE,
+      body: JSON.stringify({ request_id: requestId, answers }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+  return (await res.json()) as { request_id: string; status: string };
 }
 
 export async function fetchModels(): Promise<Model[]> {
