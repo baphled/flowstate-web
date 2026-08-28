@@ -6,6 +6,7 @@ import { useNow } from "@/composables/useNow";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 import ThinkingPanel from "./ThinkingPanel.vue";
 import PermissionPrompt from "./PermissionPrompt.vue";
+import QuestionPrompt from "./QuestionPrompt.vue";
 import CopyButton from "@/components/tools/CopyButton.vue";
 import ToolErrorCard from "@/components/tools/ToolErrorCard.vue";
 import GenericTool from "@/components/tools/GenericTool.vue";
@@ -591,6 +592,25 @@ const pendingPermissionForBubble = computed(() => {
   return null;
 });
 
+// Question Tool (Aug 2026) — the inline QuestionPrompt anchors to the
+// suspended question tool_call bubble, mirroring
+// pendingPermissionForBubble. Match by tool_name ("question");
+// first-match wins on same-tool concurrency, v1 acceptable.
+const pendingQuestionForBubble = computed(() => {
+  if (!isToolInvocation.value) return null;
+  const targetTool = props.message.toolName;
+  if (!targetTool) return null;
+  // Defensive: stub chatStore without the Question Tool fields.
+  const pending = chatStore.pendingQuestions;
+  if (!pending) return null;
+  for (const entry of Object.values(pending)) {
+    if (entry?.tool_name === targetTool && entry.status === "pending") {
+      return entry;
+    }
+  }
+  return null;
+});
+
 async function handleRevert(): Promise<void> {
   await chatStore.revertToMessage(props.message.id);
 }
@@ -728,6 +748,18 @@ async function handleRegenerate(): Promise<void> {
       <PermissionPrompt
         v-if="pendingPermissionForBubble"
         :request="pendingPermissionForBubble"
+      />
+      <!--
+        Question Tool (Aug 2026). Inline QuestionPrompt anchored
+        beneath the suspended question tool_call's render, mirroring
+        the PermissionPrompt above. Answered / timeout transitions
+        remove the entry from chatStore.pendingQuestions via
+        pollTurnUntilTerminal's diff so the prompt unmounts cleanly
+        across both tabs.
+      -->
+      <QuestionPrompt
+        v-if="pendingQuestionForBubble"
+        :request="pendingQuestionForBubble"
       />
     </div>
 
