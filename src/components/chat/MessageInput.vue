@@ -649,18 +649,22 @@ watch(
       a mount-time flicker during the first drag.
     -->
     <!--
-      Opencode-style answer selector (Aug 2026) — renders one stacked
-      card per pending blocking question directly above the composer.
-      Keyboard ownership: while a selector is open, its keydown handler
-      is a document-level capture listener inside the component; the
-      composer textarea is dimmed so arrow keys clearly belong to the
-      selector.
+      Opencode CLI pattern (Aug 2026 rework) — when a blocking question
+      is pending, the question selector REPLACES the composer entirely
+      (textarea, attachments, send controls all unmounted) until the
+      answer resolves via the long-poll diff. Keyboard ownership is
+      unambiguous: arrows/space/Enter belong to the selector.
     -->
-    <QuestionSelector
-      v-for="pending in pendingQuestions"
-      :key="pending.request_id"
-      :request="pending"
-    />
+    <template v-if="pendingQuestions.length > 0">
+      <QuestionSelector
+        v-for="pending in pendingQuestions"
+        :key="pending.request_id"
+        :request="pending"
+      />
+      <p class="input-hint">↑↓ move · space select · Enter submit · Esc dismiss</p>
+    </template>
+
+    <template v-else>
 
     <div
       v-if="isDragging"
@@ -806,11 +810,13 @@ watch(
       </button>
     </div>
 
+    </template>
+
     <p v-if="store.error" class="input-error" data-testid="chat-error">
       {{ store.error }}
     </p>
 
-    <p class="input-hint">Enter to send · Shift+Enter / Alt+Enter for newline · ↑ history · "/" commands · "@" agents</p>
+    <p v-if="pendingQuestions.length === 0" class="input-hint">Enter to send · Shift+Enter / Alt+Enter for newline · ↑ history · "/" commands · "@" agents</p>
 
     <!--
       Slash and mention pickers reuse FuzzySearchModal — the same scaffolding

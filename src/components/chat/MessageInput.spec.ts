@@ -1260,3 +1260,81 @@ describe('MessageInput — drag overlay defensive reset (P1-6)', () => {
     wrapper.unmount()
   })
 })
+
+/**
+ * Question-owns-input-region (Aug 2026 rework) — when a blocking
+ * question is pending the composer is REPLACED by the QuestionSelector
+ * (opencode CLI pattern); the textarea, send controls and attach
+ * button must not render until the question resolves.
+ */
+describe('MessageInput — question replaces composer', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function makeRequest(): import('@/api').TurnStateQuestionRequest {
+    return {
+      request_id: 'q-1',
+      tool_name: 'question',
+      question: 'Deploy now?',
+      options: ['Yes', 'No'],
+      allow_multiple: false,
+      status: 'pending',
+    }
+  }
+
+  it('hides the composer controls while a question is pending', async () => {
+    const store = useChatStore()
+    vi.spyOn(store, 'loadAgents').mockResolvedValue()
+    store.pendingQuestions['q-1'] = makeRequest()
+
+    const wrapper = mount(MessageInput, { attachTo: document.body })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="question-selector"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="message-input"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="send-button"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="attach-button"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('restores the composer after the question is answered', async () => {
+    const store = useChatStore()
+    vi.spyOn(store, 'loadAgents').mockResolvedValue()
+    store.pendingQuestions['q-1'] = makeRequest()
+
+    const wrapper = mount(MessageInput, { attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="message-input"]').exists()).toBe(false)
+
+    delete store.pendingQuestions['q-1']
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="question-selector"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="message-input"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="send-button"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('submitting from the selector routes through chatStore.answerQuestion', async () => {
+    const store = useChatStore()
+    vi.spyOn(store, 'loadAgents').mockResolvedValue()
+    store.pendingQuestions['q-1'] = makeRequest()
+    const answerSpy = vi.fn().mockResolvedValue(undefined)
+    store.answerQuestion = answerSpy
+
+    const wrapper = mount(MessageInput, { attachTo: document.body })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="question-selector-row-1"]').trigger('click')
+    await wrapper.find('[data-testid="question-selector-submit"]').trigger('click')
+    await flushPromises()
+
+    expect(answerSpy).toHaveBeenCalledWith('q-1', ['No'])
+    wrapper.unmount()
+  })
+})
