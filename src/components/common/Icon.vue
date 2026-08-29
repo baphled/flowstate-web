@@ -11,6 +11,7 @@ import {
   Inbox,
   Square,
   Paperclip,
+  Mic,
   X,
 } from "lucide-vue-next";
 
@@ -40,6 +41,7 @@ export type IconName =
   | "inbox"
   | "stop"
   | "attach"
+  | "mic"
   | "close";
 
 // Catalogue: semantic name -> Lucide component. Add new entries here as
@@ -55,6 +57,7 @@ const REGISTRY: Record<IconName, Component> = {
   inbox: Inbox,
   stop: Square,
   attach: Paperclip,
+  mic: Mic,
   close: X,
 };
 

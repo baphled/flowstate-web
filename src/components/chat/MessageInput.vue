@@ -9,6 +9,7 @@ import { SLASH_COMMANDS } from '@/commands/slashCommands'
 import type { FuzzySearchItem } from '@/composables/useFuzzyFilter'
 import { showToast } from '@/composables/useToast'
 import { uploadAttachments as apiUploadAttachments } from '@/api'
+import VoiceActivationButton from '@/components/chat/VoiceActivationButton.vue'
 
 defineOptions({ name: 'MessageInput' })
 
@@ -507,6 +508,27 @@ function handleDrop(event: DragEvent): void {
   }
 }
 
+// ---- Voice Push-to-Talk (Aug 2026) ----
+//
+// The mic button (VoiceActivationButton) emits a transcript once the
+// server-side whisper transcription resolves. Insert it at the END of
+// the composer buffer — the common case for push-to-talk is appending
+// dictated text to (or starting) a draft. Keep any history-walk state
+// coherent by dropping back to live mode first, then re-run the
+// trigger detector so a dictated "/cmd" or "@mention" opens the
+// correct picker.
+function handleVoiceTranscript(text: string): void {
+  historyCursor.value = -1
+  liveDraft.value = ''
+  const joiner = inputText.value.length > 0 ? ' ' : ''
+  inputText.value = `${inputText.value}${joiner}${text}`
+  void nextTick(() => {
+    autoResize()
+    recomputeTrigger()
+    textareaRef.value?.focus()
+  })
+}
+
 async function uploadPendingAttachments(): Promise<string[]> {
   // Chat Attachments Backend PR1 (May 2026) — closes the B3
   // silent-file-loss bug. Plan §6 task-05.
@@ -724,6 +746,12 @@ watch(
       >
         <Icon name="attach" :size="18" />
       </button>
+      <!--
+        Voice Push-to-Talk (Aug 2026) — hold-to-talk mic button. See
+        VoiceActivationButton.vue for the capture/convert/POST flow and
+        the 501/503 non-blocking hint contract.
+      -->
+      <VoiceActivationButton @transcript="handleVoiceTranscript" />
       <input
         ref="fileInputRef"
         type="file"
