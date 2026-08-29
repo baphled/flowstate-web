@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useChatStore } from '@/stores/chatStore'
 import FuzzySearchModal from '@/components/common/FuzzySearchModal.vue'
 import Icon from '@/components/common/Icon.vue'
+import QuestionSelector from '@/components/chat/QuestionSelector.vue'
 import { detectTrigger, insertToken, type TriggerDescriptor } from '@/composables/useInputTriggers'
 import { SLASH_COMMANDS } from '@/commands/slashCommands'
 import type { FuzzySearchItem } from '@/composables/useFuzzyFilter'
@@ -75,6 +76,11 @@ const streamingState = computed(() => store.streamingFor(store.currentSessionId)
 const isStreamingNow = computed(
   () => streamingState.value.isStreaming || streamingState.value.isLoading,
 )
+
+// Aug 2026 — pending blocking questions surface their opencode-style
+// selector cards above the composer (read reactively from the store so
+// the long-poll diff mounts/unmounts them).
+const pendingQuestions = computed(() => Object.values(store.pendingQuestions ?? {}))
 
 // Static slash-command catalogue mirrored from the TUI registry. See
 // web/src/commands/slashCommands.ts for the canonical source-of-truth
@@ -620,6 +626,20 @@ watch(
       visible when isDragging is true; keeps layout stable and avoids
       a mount-time flicker during the first drag.
     -->
+    <!--
+      Opencode-style answer selector (Aug 2026) — renders one stacked
+      card per pending blocking question directly above the composer.
+      Keyboard ownership: while a selector is open, its keydown handler
+      is a document-level capture listener inside the component; the
+      composer textarea is dimmed so arrow keys clearly belong to the
+      selector.
+    -->
+    <QuestionSelector
+      v-for="pending in pendingQuestions"
+      :key="pending.request_id"
+      :request="pending"
+    />
+
     <div
       v-if="isDragging"
       class="message-input-drag-overlay"
