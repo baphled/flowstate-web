@@ -3321,7 +3321,13 @@ export const useChatStore = defineStore('chat', {
           for (const entry of incomingQuestions) {
             if (!entry?.request_id) continue
             seenQuestionIds.add(entry.request_id)
-            if (entry.status === 'pending') {
+            // Status-casing tolerance: normalise the wire value before
+            // the pending/resolved branch so a server emitting
+            // "Pending"/"Answered" (or any casing) still routes
+            // correctly instead of being misread as resolved.
+            const rawStatus =
+              typeof entry.status === 'string' ? entry.status.toLowerCase() : ''
+            if (rawStatus === 'pending') {
               this.pendingQuestions[entry.request_id] = entry
             } else {
               if (this.pendingQuestions[entry.request_id]) {

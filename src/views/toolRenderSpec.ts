@@ -23,6 +23,10 @@ const primaryArgKeys: Record<string, readonly string[]> = {
   glob: ["pattern"],
   grep: ["pattern"],
   skill_load: ["name"],
+  // Question Tool (Aug 2026) — the blocking clarifying-question tool's
+  // primary arg is the question text; show it as the heading so the
+  // dedicated QuestionTool renderer surfaces the actual question.
+  question: ["question"],
 };
 
 // preferredFallbackKeys mirrors the Go-side priority list in

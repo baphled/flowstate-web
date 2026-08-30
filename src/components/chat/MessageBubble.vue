@@ -10,7 +10,7 @@ import QuestionPrompt from "./QuestionPrompt.vue";
 import CopyButton from "@/components/tools/CopyButton.vue";
 import ToolErrorCard from "@/components/tools/ToolErrorCard.vue";
 import GenericTool from "@/components/tools/GenericTool.vue";
-import { getToolComponent } from "@/tools/toolRegistry";
+import { getToolComponent, toolNamesMatch } from "@/tools/toolRegistry";
 import { buildToolRenderSpec } from "@/views/toolRenderSpec";
 import { sanitiseMessageContent } from "@/lib/messageContentBackstop";
 
@@ -594,8 +594,11 @@ const pendingPermissionForBubble = computed(() => {
 
 // Question Tool (Aug 2026) — the inline QuestionPrompt anchors to the
 // suspended question tool_call bubble, mirroring
-// pendingPermissionForBubble. Match by tool_name ("question");
-// first-match wins on same-tool concurrency, v1 acceptable.
+// pendingPermissionForBubble. Match by tool_name via toolNamesMatch
+// (exact OR basename-normalised) so a namespaced emission
+// (`mcp__server__question`) still anchors when the message carries the
+// bare `question` name — or vice versa; first-match wins on same-tool
+// concurrency, v1 acceptable.
 const pendingQuestionForBubble = computed(() => {
   if (!isToolInvocation.value) return null;
   const targetTool = props.message.toolName;
@@ -604,7 +607,11 @@ const pendingQuestionForBubble = computed(() => {
   const pending = chatStore.pendingQuestions;
   if (!pending) return null;
   for (const entry of Object.values(pending)) {
-    if (entry?.tool_name === targetTool && entry.status === "pending") {
+    if (
+      entry?.tool_name &&
+      toolNamesMatch(entry.tool_name, targetTool) &&
+      entry.status === "pending"
+    ) {
       return entry;
     }
   }
