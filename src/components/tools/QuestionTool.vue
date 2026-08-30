@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { useChatStore } from "@/stores/chatStore";
+import { toolNameBasename } from "@/tools/toolRegistry";
 import type { ToolRendererProps } from "./toolRendererProps";
 
 /**
@@ -33,6 +35,30 @@ const props = withDefaults(defineProps<ToolRendererProps>(), {
   status: "pending",
 });
 
+const chatStore = useChatStore();
+
+/**
+ * Store cross-check: the tool_call message's status can read
+ * "completed" while the question is still unanswered (e.g. the
+ * tool_call row is sealed as a terminal-looking message before the
+ * answer arrives, or the turn long-poll never carries a resolved
+ * question_requests entry). Any pending entry in
+ * chatStore.pendingQuestions whose tool_name matches this bubble's
+ * tool (via toolNameBasename, so namespaced emissions match too)
+ * means the interaction is still open.
+ */
+const isStillPending = computed(() => {
+  const pending = chatStore.pendingQuestions;
+  if (!pending) return false;
+  const target = toolNameBasename(props.toolName);
+  return Object.values(pending).some(
+    (entry) =>
+      entry?.tool_name &&
+      entry.status === "pending" &&
+      toolNameBasename(entry.tool_name) === target,
+  );
+});
+
 const glyph = computed(() => {
   switch (props.status) {
     case "pending":
@@ -48,6 +74,9 @@ const glyph = computed(() => {
 });
 
 const label = computed(() => {
+  if (isStillPending.value) {
+    return "Waiting for your answer…";
+  }
   if (props.status === "pending" || props.status === "running") {
     return "Waiting for answer";
   }
@@ -56,11 +85,37 @@ const label = computed(() => {
   }
   return "Answered";
 });
+
+/**
+ * Heading hardening: prefer the actual question text from the call
+ * args (toolInput JSON → args.question). If the args don't carry a
+ * usable string, fall back to the tool name — never the raw JSON
+ * blob (the `question {"options":[…]}` symptom when the primary-arg
+ * heading resolution falls through to compact JSON).
+ */
+const questionText = computed<string>(() => {
+  const raw = props.toolInput;
+  if (raw) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const q = (parsed as Record<string, unknown>).question;
+        if (typeof q === "string" && q.trim() !== "") {
+          return q;
+        }
+      }
+    } catch {
+      // Non-JSON toolInput (legacy bare-string) — not the question
+      // text path; fall through to the name fallback.
+    }
+  }
+  return props.toolName;
+});
 </script>
 
 <template>
   <div class="question-tool" data-testid="question-tool">
-    <span class="question-tool__question">{{ heading }}</span>
+    <span class="question-tool__question" data-testid="question-tool-question">{{ questionText }}</span>
     <span class="question-tool__status">
       <span data-testid="question-tool-label">{{ label }}</span>
       <span

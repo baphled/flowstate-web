@@ -117,6 +117,10 @@ describe("MessageBubble", () => {
       pendingPermissionRequests: {},
       grantingPermissionRequests: new Set<string>(),
       grantPermission: vi.fn(),
+      // Question Tool (Aug 2026) — pendingQuestions gates the inline
+      // QuestionPrompt; default empty. Specs seed it explicitly.
+      pendingQuestions: {},
+      answeringQuestionRequests: new Set<string>(),
       // Backend-owned prompt queue (May 2026) — the inline queued-bubble
       // cancel control calls cancelQueuedPrompt(sessionId, promptId).
       cancelQueuedPrompt: vi.fn(),
@@ -2341,6 +2345,85 @@ describe("MessageBubble", () => {
       await flushPromises();
 
       expect(wrapper.find('[data-testid="permission-prompt"]').exists()).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("question tool bubble-anchored fallback (Aug 2026)", () => {
+    const QuestionTool = {
+      template: '<div data-component="tool-renderer" data-tool="question" />',
+      props: ["toolName", "heading", "body", "status", "toolInput"],
+    };
+    const QuestionPromptStub = {
+      template:
+        '<div data-testid="question-prompt" :data-request-id="request.request_id">{{ request.question }} {{ request.options?.join("|") }}</div>',
+      props: { request: { type: Object, required: true } },
+    };
+
+    function makeQuestionCall(overrides: Partial<Message> = {}): Message {
+      return makeMessage({
+        id: "qc-1",
+        role: "tool_call",
+        toolName: "question",
+        toolInput: JSON.stringify({
+          question: "Which database?",
+          options: ["postgres", "sqlite"],
+        }),
+        status: "completed",
+        content: "",
+        ...overrides,
+      });
+    }
+
+    function mountQuestion(message: Message) {
+      registerTool({ name: "question", component: QuestionTool });
+      return mount(MessageBubble, {
+        props: { message },
+        global: {
+          stubs: {
+            QuestionPrompt: QuestionPromptStub,
+            ToolErrorCard,
+          },
+        },
+      });
+    }
+
+    it("surfaces an inline selector when backend omits question_requests", () => {
+      // pendingQuestions empty (backend question_requests slice absent
+      // from the long-poll) — the fallback must still surface options.
+      const wrapper = mountQuestion(makeQuestionCall());
+      const prompt = wrapper.find('[data-testid="question-prompt"]');
+      expect(prompt.exists()).toBe(true);
+      expect(prompt.attributes("data-request-id")).toBe("msg-qc-1");
+      expect(prompt.text()).toContain("Which database?");
+      expect(prompt.text()).toContain("postgres|sqlite");
+    });
+
+    it("does not render the fallback once a store entry exists", () => {
+      mockChatStore.pendingQuestions = {
+        "req-1": {
+          request_id: "req-1",
+          tool_name: "question",
+          question: "Store question?",
+          options: ["a"],
+          status: "pending",
+        },
+      };
+      const wrapper = mountQuestion(makeQuestionCall());
+      const prompt = wrapper.find('[data-testid="question-prompt"]');
+      expect(prompt.attributes("data-request-id")).toBe("req-1");
+    });
+
+    it("does not render the fallback for non-question tools", () => {
+      registerTool({ name: "bash", component: BashTool });
+      const wrapper = mountQuestion(
+        makeQuestionCall({
+          toolName: "bash",
+          toolInput: JSON.stringify({ command: "ls", options: ["a"] }),
+        }),
+      );
+      expect(wrapper.find('[data-testid="question-prompt"]').exists()).toBe(
         false,
       );
     });

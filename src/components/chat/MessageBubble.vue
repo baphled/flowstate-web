@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Message } from "@/types";
+import type { TurnStateQuestionRequest } from "@/api";
 import { useChatStore } from "@/stores/chatStore";
 import { useNow } from "@/composables/useNow";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
@@ -10,7 +11,7 @@ import QuestionPrompt from "./QuestionPrompt.vue";
 import CopyButton from "@/components/tools/CopyButton.vue";
 import ToolErrorCard from "@/components/tools/ToolErrorCard.vue";
 import GenericTool from "@/components/tools/GenericTool.vue";
-import { getToolComponent, toolNamesMatch } from "@/tools/toolRegistry";
+import { getToolComponent, toolNameBasename, toolNamesMatch } from "@/tools/toolRegistry";
 import { buildToolRenderSpec } from "@/views/toolRenderSpec";
 import { sanitiseMessageContent } from "@/lib/messageContentBackstop";
 
@@ -592,6 +593,70 @@ const pendingPermissionForBubble = computed(() => {
   return null;
 });
 
+/**
+ * Bubble-anchored fallback (Question Tool hardening, Aug 2026).
+ *
+ * Live backend probe confirmed the turn payload (GET
+ * /api/v1/sessions/{id}/turns/{turnId}) carries no question_requests
+ * state slice — the field appears only in the long-poll response, and
+ * can be omitted entirely by servers without the question registry.
+ * When that happens chatStore.pendingQuestions stays empty and the
+ * pendingQuestionForBubble anchor above never fires, leaving the user
+ * with no way to answer (the "Answered ✓" tool bubble symptom).
+ *
+ * This fallback synthesises a TurnStateQuestionRequest directly from
+ * the suspended tool_call message's own args (toolInput JSON →
+ * question / options / allow_multiple) whenever the bubble is a
+ * `question` tool_call carrying options but no tool_result yet. The
+ * request_id is derived from the message id so answerQuestion still
+ * POSTs a stable id; the backend tolerates unknown ids (the turn
+ * resumes on answer). Prefer wiring the store? Not clean here —
+ * populating pendingQuestions from a component would fight the
+ * poll-diff (which deletes entries absent from the server slice),
+ * so the inline-render fallback is the correct hardening point.
+ */
+const fallbackQuestionForBubble = computed<TurnStateQuestionRequest | null>(() => {
+  if (isToolInvocation.value === false) return null;
+  if (props.message.role !== "tool_call") return null;
+  if (pendingQuestionForBubble.value) return null;
+  const targetTool = props.message.toolName;
+  if (!targetTool || toolNameBasename(targetTool) !== "question") return null;
+  // Only when the call is still awaiting its result.
+  if (props.message.status === "error") return null;
+  const raw = props.message.toolInput;
+  if (!raw) return null;
+  let args: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    args = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const options = Array.isArray(args.options)
+    ? args.options.filter((o): o is string => typeof o === "string")
+    : [];
+  if (options.length === 0) return null;
+  const question =
+    typeof args.question === "string" && args.question.trim() !== ""
+      ? args.question
+      : "Choose an option";
+  return {
+    request_id: `msg-${props.message.id}`,
+    tool_name: targetTool,
+    question,
+    options,
+    allow_multiple: args.allow_multiple === true,
+    status: "pending",
+  };
+});
+
+const activeQuestionForBubble = computed(
+  () => pendingQuestionForBubble.value ?? fallbackQuestionForBubble.value,
+);
+
 // Question Tool (Aug 2026) — the inline QuestionPrompt anchors to the
 // suspended question tool_call bubble, mirroring
 // pendingPermissionForBubble. Match by tool_name via toolNamesMatch
@@ -765,8 +830,8 @@ async function handleRegenerate(): Promise<void> {
         across both tabs.
       -->
       <QuestionPrompt
-        v-if="pendingQuestionForBubble"
-        :request="pendingQuestionForBubble"
+        v-if="activeQuestionForBubble"
+        :request="activeQuestionForBubble"
       />
     </div>
 
