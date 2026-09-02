@@ -120,6 +120,11 @@ describe("MessageBubble", () => {
       // Question Tool (Aug 2026) — pendingQuestions gates the inline
       // QuestionPrompt; default empty. Specs seed it explicitly.
       pendingQuestions: {},
+      // Sept 2026 regression fix — answeredQuestions carries resolved
+      // entries (optimistically latched by answerQuestion / merged by
+      // the poll diff) so MessageBubble's answeredQuestionForBubble
+      // can match them and open the suppression gate.
+      answeredQuestions: {},
       answeringQuestionRequests: new Set<string>(),
       // Backend-owned prompt queue (May 2026) — the inline queued-bubble
       // cancel control calls cancelQueuedPrompt(sessionId, promptId).
@@ -2411,10 +2416,67 @@ describe("MessageBubble", () => {
         },
       };
       const wrapper = mountQuestion(makeQuestionCall());
+      // Question chat-dedup (Sept 2026 follow-up): while the store entry
+      // is pending, the bubble must NOT render the inline QuestionPrompt
+      // (the composer QuestionSelector owns the interaction) NOR the
+      // QuestionTool card — the question appears once, in the overlay.
       const prompt = wrapper.find('[data-testid="question-prompt"]');
-      expect(prompt.attributes("data-request-id")).toBe("req-1");
+      expect(prompt.exists()).toBe(false);
+      expect(wrapper.find('[data-testid="tool-renderer"]').exists()).toBe(
+        false,
+      );
     });
 
+    // Primary path (Sept 2026 live regression): backend DOES include
+    // question_requests, so pendingQuestions carries the real
+    // request_id while pending; after the operator answers via the
+    // overlay, answerQuestion latches answeredQuestions[request_id]
+    // and the poll diff merges the canonical answered entry under the
+    // SAME key. The suppression gate must open and the answered
+    // QuestionTool card must render immediately (no pending entry, no
+    // fallback, no answered entry = the "answered card never appears"
+    // live symptom).
+    it("renders the answered card once the store entry is answered (primary path, stable request_id)", async () => {
+      mockChatStore.pendingQuestions = {
+        "req-1": {
+          request_id: "req-1",
+          tool_name: "question",
+          question: "Store question?",
+          options: ["a", "b"],
+          status: "pending",
+        },
+      };
+      const wrapper = mountQuestion(makeQuestionCall());
+      expect(wrapper.find('[data-testid="tool-renderer"]').exists()).toBe(
+        false,
+      );
+
+      // Operator answers via the overlay — answerQuestion latches the
+      // answered entry under the SAME request_id and deletes the
+      // pending one; the poll diff later merges the canonical entry.
+      // The mock store is a plain (non-reactive) object, so re-mount
+      // to observe the post-answer state — mirroring the live flow
+      // where answerQuestion latches answeredQuestions[request_id]
+      // under the SAME real request_id and deletes the pending entry,
+      // and the poll diff later merges the canonical answered entry.
+      mockChatStore.pendingQuestions = {};
+      mockChatStore.answeredQuestions = {
+        "req-1": {
+          request_id: "req-1",
+          tool_name: "question",
+          question: "Store question?",
+          options: ["a", "b"],
+          status: "answered",
+          answers: ["a"],
+        },
+      };
+      const answeredWrapper = mountQuestion(makeQuestionCall());
+      expect(
+        answeredWrapper.find('[data-testid="question-prompt"]').exists(),
+      ).toBe(false);
+      const renderer = answeredWrapper.find('[data-testid="tool-renderer"]');
+      expect(renderer.exists()).toBe(true);
+    });
     it("does not render the fallback for non-question tools", () => {
       registerTool({ name: "bash", component: BashTool });
       const wrapper = mountQuestion(

@@ -619,6 +619,12 @@ const fallbackQuestionForBubble = computed<TurnStateQuestionRequest | null>(() =
   if (isToolInvocation.value === false) return null;
   if (props.message.role !== "tool_call") return null;
   if (pendingQuestionForBubble.value) return null;
+  // Sept 2026 regression fix — a resolved entry (optimistic local
+  // answer or canonical poll diff) means the interaction is closed;
+  // the answered QuestionTool card renders. Re-synthesising a pending
+  // request here would re-suppress that card (the "nothing appears in
+  // chat after answering" symptom).
+  if (answeredQuestionForBubble.value) return null;
   const targetTool = props.message.toolName;
   if (!targetTool || toolNameBasename(targetTool) !== "question") return null;
   // Only when the call is still awaiting its result.
@@ -638,11 +644,13 @@ const fallbackQuestionForBubble = computed<TurnStateQuestionRequest | null>(() =
   const options = Array.isArray(args.options)
     ? args.options.filter((o): o is string => typeof o === "string")
     : [];
-  if (options.length === 0) return null;
+  // Free-text questions (no options) must still render; only bail
+  // when there is neither a usable question nor any options.
   const question =
     typeof args.question === "string" && args.question.trim() !== ""
       ? args.question
-      : "Choose an option";
+      : "";
+  if (question === "" && options.length === 0) return null;
   return {
     request_id: `msg-${props.message.id}`,
     tool_name: targetTool,
@@ -653,9 +661,66 @@ const fallbackQuestionForBubble = computed<TurnStateQuestionRequest | null>(() =
   };
 });
 
+// Question Tool (Sept 2026 regression fix) — resolved questions
+// (answered/timeout) latched in chatStore.answeredQuestions, either
+// optimistically right after the operator submits or canonically by
+// the long-poll diff. Matching by tool name so namespaced emissions
+// still anchor. Used to (a) keep the chat-dedup suppression gate OPEN
+// (so the answered QuestionTool card renders immediately on answer)
+// and (b) stop the args-based fallback synthesis from re-firing and
+// re-suppressing the answered card.
+const answeredQuestionForBubble = computed(() => {
+  if (!isToolInvocation.value) return null;
+  const targetTool = props.message.toolName;
+  if (!targetTool) return null;
+  const resolved = chatStore.answeredQuestions;
+  if (!resolved) return null;
+  for (const entry of Object.values(resolved)) {
+    // Sept 2026 follow-up regression fix: when the backend omits
+    // question_requests, the answer POST latches a minimal entry whose
+    // tool_name is empty — match it by the fallback's derived
+    // request_id (`msg-<messageId>`) so the suppression gate still
+    // opens and the answered card renders.
+    if (entry?.request_id === `msg-${props.message.id}`) {
+      return entry;
+    }
+    if (
+      entry?.tool_name &&
+      toolNamesMatch(entry.tool_name, targetTool)
+    ) {
+      return entry;
+    }
+  }
+  return null;
+});
+
 const activeQuestionForBubble = computed(
-  () => pendingQuestionForBubble.value ?? fallbackQuestionForBubble.value,
+  () =>
+    pendingQuestionForBubble.value ??
+    fallbackQuestionForBubble.value,
 );
+
+/**
+ * Question chat-dedup (Sept 2026) — while a question is pending it
+ * must surface ONLY in the overlay surfaces (inline QuestionPrompt /
+ * composer QuestionSelector), never as a chat bubble. Without this
+ * gate the QuestionTool card renders in the stream simultaneously
+ * with the overlay — the "question renders twice" symptom. Once the
+ * question resolves (entry leaves pendingQuestions and the fallback
+ * no longer synthesises one), the bubble re-appears as the answered
+ * card (QuestionTool with latched question text + Answered label).
+ */
+const suppressQuestionBubble = computed<boolean>(
+  () =>
+    isToolInvocation.value === true &&
+    typeof props.message.toolName === "string" &&
+    toolNameBasename(props.message.toolName) === "question" &&
+    activeQuestionForBubble.value !== null,
+);
+// Propagate the resolved entry (latched question text + answers) to
+// the QuestionTool renderer so the answered card shows what the
+// operator picked without waiting for the poll diff.
+const resolvedQuestionEntry = computed(() => answeredQuestionForBubble.value);
 
 // Question Tool (Aug 2026) — the inline QuestionPrompt anchors to the
 // suspended question tool_call bubble, mirroring
@@ -798,13 +863,23 @@ async function handleRegenerate(): Promise<void> {
           data-testid="tool-card-elapsed"
         >{{ formatElapsed(Math.round(props.message.elapsedMs / 1000)) }}</span>
       </div>
+      <!--
+        Question chat-dedup (Sept 2026): while the question is
+        pending, the QuestionTool card is suppressed so the question
+        appears only in the overlay (QuestionPrompt / composer
+        QuestionSelector). Once answered, activeQuestionForBubble
+        goes null and this card renders as the answered card with
+        the latched question text.
+      -->
       <component
         :is="toolComponent"
+        v-if="!suppressQuestionBubble"
         :tool-name="toolSpec.toolName"
         :heading="toolSpec.heading"
         :body="toolSpec.body"
         :status="toolStatus"
         :tool-input="props.message.toolInput"
+        :resolved-question="resolvedQuestionEntry"
         data-testid="tool-renderer"
       />
       <!--
@@ -830,8 +905,8 @@ async function handleRegenerate(): Promise<void> {
         across both tabs.
       -->
       <QuestionPrompt
-        v-if="activeQuestionForBubble"
-        :request="activeQuestionForBubble"
+        v-if="fallbackQuestionForBubble"
+        :request="fallbackQuestionForBubble"
       />
     </div>
 

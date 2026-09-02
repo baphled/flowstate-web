@@ -523,6 +523,16 @@ export const useChatStore = defineStore('chat', {
     // removes answered/timeout/absent ones. QuestionPrompt reads
     // entries from this record.
     pendingQuestions: {} as Record<string, TurnStateQuestionRequest>,
+    // Question Tool (Sept 2026 regression fix) — resolved questions by
+    // request_id. Populated optimistically by answerQuestion on a
+    // successful POST (so the answered chat card appears immediately,
+    // without waiting for the long-poll diff) and by the poll diff
+    // when it later observes the canonical answered/timeout entry
+    // (same key → merge, never a duplicate). QuestionTool reads the
+    // latched question text + answers from here; MessageBubble's
+    // fallback synthesis and chat-dedup suppression gate exclude
+    // entries present here.
+    answeredQuestions: {} as Record<string, TurnStateQuestionRequest>,
     // Companion set of question request_ids currently in the
     // optimistic "Submitting…" state — cleared by the diff (success)
     // or the POST's failure branch (retry).
@@ -1930,6 +1940,46 @@ export const useChatStore = defineStore('chat', {
         this.answeringQuestionRequests.delete(requestId)
         throw error
       }
+      // Optimistic resolution (Sept 2026 chat-dedup regression fix):
+      // the Sept 2026 dedup gate suppressed the inline QuestionTool
+      // card while a question is pending (overlay-only), which removed
+      // the old "always-rendered card flips to Answered" behaviour.
+      // Without this local resolution nothing replaces the overlay
+      // until the long-poll diff delivers the answered entry — the
+      // "nothing appears in chat right away" symptom. Latch the
+      // pending entry's question text (the wire copy, not the args
+      // fallback) plus the operator's answers into
+      // answeredQuestions so MessageBubble's suppression gate opens
+      // immediately and the answered card renders.
+      //
+      // Second regression (Sept 2026 follow-up): when the backend
+      // omits question_requests entirely (MessageBubble's
+      // bubble-anchored fallback synthesised the request as
+      // `msg-<messageId>`), pendingQuestions has NO entry here, so the
+      // latch never fired — the fallback re-synthesised a pending
+      // request after the answer POST and the answered card stayed
+      // suppressed forever. Always latch: use the pending entry when
+      // present, otherwise a minimal entry carrying the answers (the
+      // question text comes from MessageBubble's latched/args
+      // heading, not from here).
+      const answered = this.pendingQuestions[requestId]
+      const prior = this.answeredQuestions[requestId] ?? {}
+      this.answeredQuestions[requestId] = {
+        ...(answered ?? {
+          request_id: requestId,
+          tool_name: prior.tool_name ?? '',
+          question: prior.question ?? '',
+          options: prior.options ?? [],
+          allow_multiple: prior.allow_multiple ?? false,
+        }),
+        ...prior,
+        status: 'answered',
+        answers: [...answers],
+      }
+      if (answered) {
+        delete this.pendingQuestions[requestId]
+      }
+      this.answeringQuestionRequests.delete(requestId)
     },
 
     /**
@@ -3330,6 +3380,15 @@ export const useChatStore = defineStore('chat', {
             if (rawStatus === 'pending') {
               this.pendingQuestions[entry.request_id] = entry
             } else {
+              // Sept 2026 regression fix: answerQuestion may already
+              // have latched an optimistic answered entry locally.
+              // Merge — the canonical server entry (with any server
+              // side answers) wins, but never duplicate or resurrect
+              // the pending entry.
+              this.answeredQuestions[entry.request_id] = {
+                ...(this.answeredQuestions[entry.request_id] ?? {}),
+                ...entry,
+              }
               if (this.pendingQuestions[entry.request_id]) {
                 delete this.pendingQuestions[entry.request_id]
               }
@@ -3340,6 +3399,11 @@ export const useChatStore = defineStore('chat', {
           }
           for (const knownId of Object.keys(this.pendingQuestions)) {
             if (!seenQuestionIds.has(knownId)) {
+              // NOTE (Sept 2026): absent-from-slice does NOT mean
+              // answered — a GC'd pending entry just unmounts the
+              // overlay; answeredQuestions is only populated by a
+              // local answer POST or an explicit answered/timeout wire
+              // status above.
               delete this.pendingQuestions[knownId]
               if (this.answeringQuestionRequests.has(knownId)) {
                 this.answeringQuestionRequests.delete(knownId)

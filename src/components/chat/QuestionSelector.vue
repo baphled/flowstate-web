@@ -60,6 +60,14 @@ async function submit(): Promise<void> {
 const freeTextAnswer = ref('')
 
 async function handleKeydown(event: KeyboardEvent): Promise<void> {
+  // Let the user type normally (incl. spaces) when a text input is
+  // focused; those inputs handle Enter themselves via
+  // @keydown.enter.prevent. Without this the Space shortcut below
+  // swallows spaces typed into the free-text answer input.
+  const target = event.target as HTMLElement | null
+  if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') {
+    return
+  }
   if (event.key === 'ArrowUp') {
     event.preventDefault()
     selector.moveUp()

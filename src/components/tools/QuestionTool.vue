@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { useChatStore } from "@/stores/chatStore";
 import { toolNameBasename } from "@/tools/toolRegistry";
 import type { ToolRendererProps } from "./toolRendererProps";
@@ -33,6 +33,7 @@ import type { ToolRendererProps } from "./toolRendererProps";
  */
 const props = withDefaults(defineProps<ToolRendererProps>(), {
   status: "pending",
+  resolvedQuestion: null,
 });
 
 const chatStore = useChatStore();
@@ -57,6 +58,21 @@ const isStillPending = computed(() => {
       entry.status === "pending" &&
       toolNameBasename(entry.tool_name) === target,
   );
+});
+
+/**
+ * Answered row (Sept 2026 regression fix) — MessageBubble passes the
+ * resolved entry (optimistically latched at answer time, or from the
+ * poll diff) so the answered card shows the latched question text AND
+ * the operator's answers immediately, without waiting for the poll.
+ */
+const answeredText = computed<string | null>(() => {
+  const entry = props.resolvedQuestion;
+  if (!entry || entry.status === "pending") return null;
+  if (Array.isArray(entry.answers) && entry.answers.length > 0) {
+    return entry.answers.join(", ");
+  }
+  return null;
 });
 
 const glyph = computed(() => {
@@ -87,6 +103,17 @@ const label = computed(() => {
 });
 
 /**
+ * Stable captured question text. Once the question is answered the
+ * pendingQuestions store entry is cleared/resolved, so the wire text is
+ * no longer available when the bubble re-renders the "Answered" state.
+ * Capturing it here the first time it's seen (from the pending entry or
+ * the args) keeps the heading showing the question text forever — the
+ * tool-name fallback ("question / Answered / ✓" symptom) only applies
+ * when neither source ever carried a usable string.
+ */
+const capturedQuestion = ref<string | null>(null);
+
+/**
  * Heading hardening: prefer the actual question text from the call
  * args (toolInput JSON → args.question). If the args don't carry a
  * usable string, fall back to the tool name — never the raw JSON
@@ -94,6 +121,18 @@ const label = computed(() => {
  * heading resolution falls through to compact JSON).
  */
 const questionText = computed<string>(() => {
+  // Prefer the authoritative wire text from the matching pendingQuestions
+  // store entry; the toolInput args and finally the tool name are
+  // progressively weaker fallbacks.
+  const pendingEntry = Object.values(chatStore.pendingQuestions ?? {}).find(
+    (entry) =>
+      entry?.tool_name &&
+      entry.status === "pending" &&
+      toolNameBasename(entry.tool_name) === toolNameBasename(props.toolName) &&
+      typeof entry.question === "string" &&
+      entry.question.trim() !== "",
+  );
+  if (pendingEntry) return pendingEntry.question;
   const raw = props.toolInput;
   if (raw) {
     try {
@@ -109,8 +148,25 @@ const questionText = computed<string>(() => {
       // text path; fall through to the name fallback.
     }
   }
+  // Resolved/answered path: the store entry is gone, but if we
+  // captured the question text earlier (or the args still carry it —
+  // captured by the watch below) it remains the heading.
+  if (capturedQuestion.value !== null) return capturedQuestion.value;
   return props.toolName;
 });
+
+// Persist the first usable question text (wire entry or args) into a
+// stable ref so the resolved/answered rendering keeps it after the
+// pendingQuestions entry is cleared by the poll diff.
+watch(
+  questionText,
+  (text) => {
+    if (text !== props.toolName && capturedQuestion.value === null) {
+      capturedQuestion.value = text;
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -124,6 +180,11 @@ const questionText = computed<string>(() => {
         data-testid="question-tool-glyph"
       >{{ glyph }}</span>
     </span>
+    <span
+      v-if="answeredText !== null"
+      class="question-tool__answer"
+      data-testid="question-tool-answer"
+    >{{ answeredText }}</span>
   </div>
 </template>
 
@@ -145,6 +206,12 @@ const questionText = computed<string>(() => {
   gap: 0.4rem;
   font-size: 0.85em;
   opacity: 0.85;
+}
+
+.question-tool__answer {
+  font-size: 0.85em;
+  opacity: 0.9;
+  overflow-wrap: anywhere;
 }
 
 .question-tool__glyph--spinning {
