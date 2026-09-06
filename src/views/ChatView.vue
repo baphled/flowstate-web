@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useChatStore } from '@/stores/chatStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useSwarmStore } from '@/stores/swarmStore'
+import { connectNotificationStream } from '@/lib/notifications'
 import {
   resolveAgentName,
   collapseToolPairs,
@@ -452,6 +453,7 @@ watch(
 )
 
 let teardownHierarchyNav: (() => void) | null = null
+let notificationsHandle: { disconnect(): void } | null = null
 
 // UI Parity PR2 I2 (May 2026) — keyboard-help modal open state.
 // Triggered by global `?` (when no input is focused) or `Ctrl+/` (works
@@ -614,6 +616,10 @@ onMounted(async () => {
   }
   scrollMessagePaneToBottom('smooth')
   void swarmStore.connect()
+  // Notifications SSE bridge — session-independent operator notifications
+  // (turn_complete / task_failed / cooldown / failover) rendered as toasts.
+  // Lives next to the swarm-events subscription; survives session changes.
+  notificationsHandle = connectNotificationStream()
 
   // Slice G — Escape-twice cancel cascade (Streaming Coherence May 2026).
   // Register global keydown listener for escape-twice keybinding. The
@@ -626,6 +632,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopDragging()
   swarmStore.disconnect()
+  notificationsHandle?.disconnect()
+  notificationsHandle = null
   document.removeEventListener('keydown', handleGlobalKeydown)
   if (teardownHierarchyNav) {
     teardownHierarchyNav()
