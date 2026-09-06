@@ -2,10 +2,53 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   sendSessionMessage,
   fetchTurn,
+  fetchSessionMessages,
   cancelQueuedPrompt,
   QueueFullError,
   QueuedPromptNotFoundError,
 } from "./index";
+
+describe("fetchSessionMessages", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("requests with credentials include and cache no-store so no stale payload is served", async () => {
+    await fetchSessionMessages("sess-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toMatch(/\/v1\/sessions\/sess-1\/messages$/);
+    expect((init as RequestInit | undefined)?.credentials).toBe("include");
+    expect((init as RequestInit | undefined)?.cache).toBe("no-store");
+  });
+
+  it("returns [] when the payload body is null", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("null", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const result = await fetchSessionMessages("sess-2");
+    expect(result).toEqual([]);
+  });
+});
 
 describe("sendSessionMessage", () => {
   let fetchMock: ReturnType<typeof vi.fn>;

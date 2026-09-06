@@ -957,6 +957,7 @@ export async function fetchSessionMessages(
     joinBaseURL(`/v1/sessions/${encodeURIComponent(sessionId)}/messages`),
     {
       credentials: CREDENTIALS_INCLUDE,
+      cache: "no-store",
     },
   );
   if (!res.ok) {
