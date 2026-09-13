@@ -182,6 +182,7 @@ export async function fetchSwarmEvents(): Promise<unknown[]> {
 export async function fetchSessions(): Promise<SessionSummary[]> {
   const res = await fetch(joinBaseURL("/v1/sessions"), {
     credentials: CREDENTIALS_INCLUDE,
+    cache: "no-store",
   });
   if (!res.ok) {
     throw new Error(`Failed to fetch sessions: ${res.statusText}`);
@@ -884,7 +885,7 @@ export async function fetchTurn(
     const since = Math.max(0, Math.floor(opts.since ?? 0));
     url = `${url}?wait=true&since=${since}`;
   }
-  const init: RequestInit = { credentials: CREDENTIALS_INCLUDE };
+  const init: RequestInit = { credentials: CREDENTIALS_INCLUDE, cache: "no-store" };
   if (opts.signal) {
     init.signal = opts.signal;
   }
