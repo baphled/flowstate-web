@@ -182,6 +182,7 @@ export function connectNotificationStream(): NotificationStreamHandle {
   let reconnectAttempt = 0;
   let stallTimerId: ReturnType<typeof setTimeout> | null = null;
   let reconnectTimerId: ReturnType<typeof setTimeout> | null = null;
+  let abortController: AbortController | null = null;
   const dedupe = createNotificationDeduper();
   const handle: NotificationStreamHandle = { disconnect };
 
@@ -203,10 +204,25 @@ export function connectNotificationStream(): NotificationStreamHandle {
     }, STALL_TIMEOUT_MS);
   }
 
+  /**
+   * Abort the in-flight fetch (if any) and drop the controller. Mirrors
+   * swarmStore: the AbortError rejects the pending reader.read(), which
+   * the catch below filters out, so no spurious reconnect is scheduled.
+   */
+  function abortInFlight(): void {
+    if (abortController !== null) {
+      abortController.abort();
+      abortController = null;
+    }
+  }
+
   function attemptReconnect(myGeneration: number): void {
     if (myGeneration !== generation || aborted) return;
     if (reconnectTimerId !== null) clearTimeout(reconnectTimerId);
     if (reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) return;
+    // Connection-leak fix: kill the previous (stalled/closed) fetch
+    // before scheduling a new one so reconnects never stack streams.
+    abortInFlight();
     reconnectAttempt += 1;
     const delay = Math.min(
       RECONNECT_BASE_DELAY_MS * Math.pow(2, reconnectAttempt - 1),
@@ -220,9 +236,15 @@ export function connectNotificationStream(): NotificationStreamHandle {
   }
 
   async function readLoop(myGeneration: number): Promise<void> {
+    // Connection-leak fix: each readLoop owns an AbortController so
+    // disconnect()/attemptReconnect() can tear the socket down.
+    abortInFlight();
+    const controller = new AbortController();
+    abortController = controller;
     try {
       const response = await fetch(joinBaseURL(NOTIFICATIONS_ENDPOINT), {
         credentials: "include",
+        signal: controller.signal,
       });
       if (myGeneration !== generation) return;
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -254,10 +276,18 @@ export function connectNotificationStream(): NotificationStreamHandle {
         buffer = lines.pop() || "";
         for (const line of lines) ingestLine(line);
       }
-    } catch {
-      if (myGeneration === generation && !aborted) {
+    } catch (e) {
+      // Aborts are intentional teardown — never treat them as a failure
+      // to reconnect (prevents a reconnect storm after disconnect()).
+      if (
+        myGeneration === generation &&
+        !aborted &&
+        !(e instanceof Error && e.name === "AbortError")
+      ) {
         attemptReconnect(myGeneration);
       }
+    } finally {
+      if (abortController === controller) abortController = null;
     }
   }
 
@@ -273,6 +303,9 @@ export function connectNotificationStream(): NotificationStreamHandle {
     aborted = true;
     generation += 1;
     clearTimers();
+    // Connection-leak fix: abort the in-flight SSE fetch so its socket
+    // and reader are released immediately (mirrors swarmStore.disconnect).
+    abortInFlight();
     if (activeHandle === handle) activeHandle = null;
   }
 

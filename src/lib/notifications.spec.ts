@@ -9,6 +9,7 @@ import {
   DEFAULT_SEVERITY_BY_TYPE,
   SEVERITY_TO_VARIANT,
   TITLE_BY_TYPE,
+  connectNotificationStream,
   createNotificationDeduper,
   notificationToToast,
   parseNotificationEvent,
@@ -201,5 +202,27 @@ describe("end-to-end: parsed duplicate wire lines produce one toast", () => {
     expect(toasts.value).toHaveLength(2);
     expect(toasts.value[0].variant).toBe("default");
     expect(toasts.value[1].variant).toBe("error");
+  });
+});
+
+describe("connectNotificationStream: abort wiring (connection leak)", () => {
+  it("passes an abort signal to the SSE fetch and aborts on disconnect", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => {
+        // Never-resolving response body — a permanently pending stream,
+        // exactly the shape that used to leak when nothing aborted it.
+        return new Promise(() => undefined);
+      }),
+    );
+    const handle = connectNotificationStream();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const signal = (fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+
+    handle.disconnect();
+    expect(signal.aborted).toBe(true);
+    vi.unstubAllGlobals();
   });
 });
