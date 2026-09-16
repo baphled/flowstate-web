@@ -188,28 +188,6 @@ function precedingUserPromptFor(messageId: string): { id: string; content: strin
 // the drift-risk note and the future-work item to consolidate.
 const activeStreamingState = computed(() => chatStore.streamingFor(chatStore.currentSessionId))
 
-// Active delegations for the activity indicator. When the current session
-// has in-flight delegations (delegation_started without matching delegation),
-// these show the agent name and latest tool action instead of the model info.
-// Multiple concurrent agents show as a comma-separated list. Falls back to
-// model info ("on model · provider") during regular streaming.
-const activeDelegations = computed(() => {
-  const messages = chatStore.messages
-  // Collect completed chainIds so we know which delegations are still live.
-  const completedChainIds = new Set<string>()
-  for (const msg of messages) {
-    if (msg.role === "delegation" && msg.chainId) {
-      completedChainIds.add(msg.chainId)
-    }
-  }
-  return messages.filter(
-    (msg) =>
-      msg.role === "delegation_started" &&
-      msg.chainId &&
-      !completedChainIds.has(msg.chainId),
-  )
-})
-
 // UI Parity PR5 — Live token counter (May 2026).
 //
 // The engine threads cumulative output_tokens onto every
@@ -830,11 +808,10 @@ onBeforeUnmount(() => {
 
       <!--
         Activity indicator — shown during streaming or loading (delegation).
-        When a delegation is in-flight, the indicator shows the delegated
-        agent's most recent action (agent · tool — content) instead of model
-        info, since the delegation card already carries the model chip and
-        showing it twice is redundant. During regular streaming the model
-        info fallback ("on model · provider") is preserved.
+        The in-flight delegation card in the thread is the single surface
+        for a delegation (agent, latest tool, content); the indicator
+        falls back to model info ("on model · provider") during regular
+        streaming.
       -->
       <div
         v-if="activeStreamingState.isStreaming || activeStreamingState.isLoading"
@@ -846,22 +823,7 @@ onBeforeUnmount(() => {
         <span class="agent-activity-dot" aria-hidden="true" />
         <span class="agent-activity-label">{{ chatStore.agentId }} is working…</span>
         <span
-          v-if="activeDelegations.length > 0"
-          class="agent-activity-delegations"
-          data-testid="agent-activity-delegations"
-        >
-          <span
-            v-for="(del, idx) in activeDelegations"
-            :key="del.chainId || idx"
-            class="agent-activity-delegation"
-            data-testid="agent-activity-delegation"
-          >
-            <template v-if="idx > 0">, </template>
-            → {{ del.targetAgent || "Agent" }}<template v-if="del.lastTool"> · {{ del.lastTool }}</template><template v-if="del.content"> — {{ del.content }}</template>
-          </span>
-        </span>
-        <span
-          v-else-if="chatStore.currentModelId || chatStore.currentProviderId"
+          v-if="chatStore.currentModelId || chatStore.currentProviderId"
           class="agent-activity-model"
           data-testid="agent-activity-model"
         >

@@ -661,6 +661,123 @@ describe("MessageBubble", () => {
     });
   });
 
+  /**
+   * Delegation single-surface (Sept 2026 UI audit, issue 1): the
+   * delegation card is the ONLY chat surface for a delegation chain.
+   * A `task` tool row carrying a chainId (identity stamped by the
+   * chatStore at ingestion / load time) renders nothing — the
+   * delegation_started card owns the in-flight state and the terminal
+   * `delegation` card owns the completed state. A `task` row without a
+   * chain link keeps its generic tool card. The rule is row-local:
+   * no sibling-message inspection, no "suppress because another card
+   * exists" logic.
+   */
+  describe("delegation single-surface (one card per delegation)", () => {
+    it("renders no tool card and no bubble for a delegation-linked task tool_call", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          id: "tc-1",
+          role: "tool_call",
+          toolName: "task",
+          toolInput: '{"agent":"executor","description":"Implement the user model"}',
+          content: "",
+          chainId: "chain-1",
+        }),
+      );
+
+      expect(wrapper.find('[data-component="tool-renderer"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="delegation-started-card"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="delegation-completed-card"]').exists()).toBe(false);
+      expect(wrapper.text()).toBe("");
+    });
+
+    it("renders no tool card for the delegation-linked merged task result row", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          id: "tr-1",
+          role: "tool_result",
+          toolName: "task",
+          content: "child finished",
+          chainId: "chain-1",
+        }),
+      );
+
+      expect(wrapper.find('[data-component="tool-renderer"]').exists()).toBe(false);
+      expect(wrapper.text()).toBe("");
+    });
+
+    it("still renders the generic tool card for a task tool row with no delegation link", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          id: "tc-2",
+          role: "tool_call",
+          toolName: "task",
+          toolInput: '{"agent":"executor"}',
+          content: "",
+        }),
+      );
+
+      const tool = wrapper.find('[data-component="tool-renderer"]');
+      expect(tool.exists()).toBe(true);
+      expect(tool.attributes("data-tool")).toBe("generic");
+    });
+
+    it("renders the in-flight card (spinner + Live) for a running delegation_started row", () => {
+      const wrapper = mountWithRouter(
+        makeMessage({
+          id: "ds-1",
+          role: "delegation_started",
+          content: "",
+          chainId: "chain-1",
+          targetAgent: "executor",
+          status: "running",
+        }),
+      );
+
+      expect(wrapper.find('[data-testid="delegation-started-card"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="delegation-spinner"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="delegation-live-badge"]').exists()).toBe(true);
+    });
+
+    it("renders nothing for a completed delegation_started row (status gate retires the in-flight card)", () => {
+      const wrapper = mountWithRouter(
+        makeMessage({
+          id: "ds-2",
+          role: "delegation_started",
+          content: "",
+          chainId: "chain-1",
+          targetAgent: "executor",
+          status: "completed",
+        }),
+      );
+
+      expect(wrapper.find('[data-testid="delegation-started-card"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="delegation-spinner"]').exists()).toBe(false);
+      expect(wrapper.text()).toBe("");
+    });
+
+    it("renders only the completed card for a terminal delegation row, with the store-stamped duration", () => {
+      const wrapper = mountWithRouter(
+        makeMessage({
+          id: "d-1",
+          role: "delegation",
+          content: "Implemented the user model",
+          chainId: "chain-1",
+          targetAgent: "executor",
+          status: "completed",
+          durationMs: 15000,
+          timestamp: "2026-06-01T00:00:15Z",
+        }),
+      );
+
+      const completed = wrapper.find('[data-testid="delegation-completed-card"]');
+      expect(completed.exists()).toBe(true);
+      expect(completed.text()).toContain("15s");
+      expect(wrapper.find('[data-testid="delegation-started-card"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="delegation-spinner"]').exists()).toBe(false);
+    });
+  });
+
   // B2 (Vue UI Parity vs OpenCode, May 2026): ThinkingPanel.
   // Pre-fix MessageBubble rendered a bare `<p class="thinking">{{
   // props.message.content }}</p>` — italic and dimmed but flat

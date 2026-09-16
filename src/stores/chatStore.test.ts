@@ -4719,6 +4719,245 @@ describe('chatStore - applyDelegationEvent', () => {
   })
 })
 
+/**
+ * Fixture: a completed delegation thread as the backend persists it.
+ * The parent called the `task` tool, the engine emitted a
+ * `delegation_started` row when the child spawned and a terminal
+ * `delegation` row when it finished. The backend does not persist
+ * chain_id on the `task` rows, so a cold load must re-establish that
+ * identity and retire the started row for the single-surface contract
+ * (one delegation card per chain).
+ */
+function makeCompletedDelegationThread(): Array<Record<string, unknown>> {
+  return [
+    { id: 'u1', role: 'user', content: 'delegate this', timestamp: '2026-09-01T09:00:00Z' },
+    { id: 'tc1', role: 'tool_call', toolName: 'task', content: '', timestamp: '2026-09-01T09:00:01Z', toolInput: '{"agent":"executor","description":"Implement the user model"}' },
+    { id: 'ds1', role: 'delegation_started', content: '', timestamp: '2026-09-01T09:00:01Z', status: 'running', chainId: 'chain-1', targetAgent: 'executor', description: 'Implement the user model' },
+    { id: 'tr1', role: 'tool_result', toolName: 'task', content: 'child finished', timestamp: '2026-09-01T09:00:08Z' },
+    { id: 'd1', role: 'delegation', content: '│ executor [completed]', timestamp: '2026-09-01T09:00:08Z', status: 'completed', chainId: 'chain-1', targetAgent: 'executor', description: 'Implement the user model' },
+  ]
+}
+
+describe('chatStore - delegation single-surface (started-row retirement + task-row identity)', () => {
+  beforeEach(() => {
+    installLocalStorageStub()
+    vi.clearAllMocks()
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('poll merge retires the delegation_started row and links the task tool rows when the terminal delegation row lands', async () => {
+    vi.useFakeTimers()
+    const store = useChatStore()
+    store.agentId = 'agent-1'
+    store.currentSessionId = 'session-d1'
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'delegate this', timestamp: '' },
+    ]
+
+    const fs = vi.mocked(fetchSessions)
+    fs.mockReset()
+    fs.mockResolvedValue([])
+
+    const ft = vi.mocked(fetchTurn)
+    ft.mockReset()
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d1',
+      session_id: 'session-d1',
+      status: 'running',
+      started_at: '',
+      completed_at: null,
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [
+        { id: 'tc1', role: 'tool_call', toolName: 'task', content: '', timestamp: '', toolInput: '{"agent":"executor"}' },
+        { id: 'ds1', role: 'delegation_started', content: '', timestamp: '', status: 'running', chainId: 'chain-1', targetAgent: 'executor' },
+      ],
+    } as never)
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d1',
+      session_id: 'session-d1',
+      status: 'running',
+      started_at: '',
+      completed_at: null,
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [
+        { id: 'tr1', role: 'tool_result', toolName: 'task', content: 'child finished', timestamp: '' },
+        { id: 'd1', role: 'delegation', content: '│ executor [completed]', timestamp: '', status: 'completed', chainId: 'chain-1', targetAgent: 'executor' },
+      ],
+    } as never)
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d1',
+      session_id: 'session-d1',
+      status: 'completed',
+      started_at: '',
+      completed_at: '',
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [],
+    } as never)
+
+    const pollPromise = store.pollTurnUntilTerminal('session-d1', 'turn-d1')
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    await pollPromise
+
+    expect(store.messages.filter((m) => m.role === 'delegation_started')).toHaveLength(0)
+    const terminal = store.messages.filter((m) => m.role === 'delegation')
+    expect(terminal).toHaveLength(1)
+    expect(terminal[0].id).toBe('d1')
+    expect(store.messages.find((m) => m.id === 'tc1')?.chainId).toBe('chain-1')
+    expect(store.messages.find((m) => m.id === 'tr1')?.chainId).toBe('chain-1')
+  })
+
+  it('poll merge retirement matches chainId exactly — a different chain\'s delegation_started row survives', async () => {
+    vi.useFakeTimers()
+    const store = useChatStore()
+    store.agentId = 'agent-1'
+    store.currentSessionId = 'session-d2'
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'delegate twice', timestamp: '' },
+    ]
+
+    const fs = vi.mocked(fetchSessions)
+    fs.mockReset()
+    fs.mockResolvedValue([])
+
+    const ft = vi.mocked(fetchTurn)
+    ft.mockReset()
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d2',
+      session_id: 'session-d2',
+      status: 'running',
+      started_at: '',
+      completed_at: null,
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [
+        { id: 'ds-a', role: 'delegation_started', content: '', timestamp: '', status: 'running', chainId: 'chain-a', targetAgent: 'researcher' },
+        { id: 'd-b', role: 'delegation', content: '│ executor [completed]', timestamp: '', status: 'completed', chainId: 'chain-b', targetAgent: 'executor' },
+      ],
+    } as never)
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d2',
+      session_id: 'session-d2',
+      status: 'completed',
+      started_at: '',
+      completed_at: '',
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [],
+    } as never)
+
+    const pollPromise = store.pollTurnUntilTerminal('session-d2', 'turn-d2')
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    await pollPromise
+
+    expect(store.messages.find((m) => m.id === 'ds-a')).toBeDefined()
+    expect(store.messages.find((m) => m.id === 'd-b')).toBeDefined()
+  })
+
+  it('applyDelegationEvent retires the matching delegation_started row and links the task tool row on a completed event', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'plan something', timestamp: '2026-05-04T00:00:00Z' },
+      { id: 'tc1', role: 'tool_call', toolName: 'task', content: '', timestamp: '2026-05-04T00:00:01Z', toolInput: '{"agent":"executor","description":"Implement the user model"}' },
+      {
+        id: 'd1',
+        role: 'delegation_started',
+        content: '',
+        timestamp: '2026-05-04T00:00:01Z',
+        chainId: 'chain-1',
+        targetAgent: 'executor',
+        status: 'running',
+      },
+    ]
+
+    store.applyDelegationEvent(
+      { kind: 'delegation', raw: '', targetAgent: 'executor', chainId: 'chain-1', status: 'completed', description: 'Implement the user model' },
+    )
+
+    expect(store.messages.filter((m) => m.role === 'delegation_started')).toHaveLength(0)
+    expect(store.messages.find((m) => m.id === 'u1')).toBeDefined()
+    expect(store.messages.find((m) => m.id === 'tc1')?.chainId).toBe('chain-1')
+  })
+
+  it('applyDelegationEvent leaves the delegation_started row in place for non-terminal events', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'plan something', timestamp: '2026-05-04T00:00:00Z' },
+      {
+        id: 'd1',
+        role: 'delegation_started',
+        content: '',
+        timestamp: '2026-05-04T00:00:01Z',
+        chainId: 'chain-1',
+        targetAgent: 'executor',
+        status: 'running',
+      },
+    ]
+
+    store.applyDelegationEvent(
+      { kind: 'delegation', raw: '', chainId: 'chain-1', toolCalls: 3, lastTool: 'bash', status: 'running' },
+    )
+
+    const started = store.messages.filter((m) => m.role === 'delegation_started')
+    expect(started).toHaveLength(1)
+    expect(started[0].toolCalls).toBe(3)
+  })
+
+  it('cold load retires the completed chain\'s started row and stamps delegation identity onto the task tool rows', async () => {
+    vi.mocked(fetchSessions).mockResolvedValueOnce([
+      {
+        id: 'session-cold',
+        agentId: 'agent-1',
+        title: 'Cold Thread',
+        createdAt: '',
+        updatedAt: '',
+        messageCount: 5,
+        status: 'active',
+        depth: 0,
+        isStreaming: false,
+      },
+    ])
+    vi.mocked(fetchSessionMessages).mockResolvedValueOnce(
+      makeCompletedDelegationThread() as never,
+    )
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.loadSessionMessages('session-cold')
+
+    expect(store.messages.filter((m) => m.role === 'delegation_started')).toHaveLength(0)
+    expect(store.messages.find((m) => m.id === 'd1')).toBeDefined()
+    expect(store.messages.find((m) => m.id === 'd1')?.durationMs).toBe(7000)
+    expect(store.messages.find((m) => m.id === 'tc1')?.chainId).toBe('chain-1')
+    expect(store.messages.find((m) => m.id === 'tr1')?.chainId).toBe('chain-1')
+  })
+
+  it('reconcileFromBackend re-establishes delegation identity on the merged history', async () => {
+    const store = useChatStore()
+    store.agentId = 'agent-1'
+    store.currentSessionId = 'session-rec'
+
+    vi.mocked(fetchSessionMessages).mockResolvedValueOnce(
+      makeCompletedDelegationThread() as never,
+    )
+
+    await store.reconcileFromBackend('session-rec')
+
+    expect(store.messages.filter((m) => m.role === 'delegation_started')).toHaveLength(0)
+    expect(store.messages.find((m) => m.id === 'tc1')?.chainId).toBe('chain-1')
+  })
+})
+
 // ── stampToolElapsedTimes — per-tool elapsedMs from timestamp deltas ──
 
 describe('chatStore - stampToolElapsedTimes', () => {

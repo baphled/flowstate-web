@@ -455,6 +455,105 @@ function rowsShallowEqual(existing: Message, incoming: Partial<Message>): boolea
   return true
 }
 
+/**
+ * isTaskToolRow reports whether the message is a `task` tool invocation
+ * row that has not yet been linked to a delegation chain. The `task`
+ * tool is the delegation dispatcher, and the backend does not persist
+ * chain_id on its tool_call/tool_result rows, so an unlinked row is a
+ * delegation invocation whose identity still needs establishing.
+ */
+function isTaskToolRow(message: Message): boolean {
+  return (
+    (message.role === 'tool_call' || message.role === 'tool_result') &&
+    message.toolName === 'task' &&
+    message.chainId === undefined
+  )
+}
+
+/**
+ * linkDelegationChain stamps a delegation's chainId onto the `task` tool
+ * rows of the invocation that spawned the chain — store-side identity
+ * for the single-surface contract (the delegation card is the only
+ * chat surface for a delegation; the generic task tool card never
+ * renders for a linked row).
+ *
+ * Matching: prefer the unlinked `task` row whose toolInput carries the
+ * delegation's task description (the strongest identity available on a
+ * cold reload of a persisted thread); fall back to the FIRST unlinked
+ * `task` row — the engine emits tool_call(task) before the delegation
+ * row, so dispatch order === link order. Idempotent: already-linked
+ * rows are never re-stamped.
+ */
+function linkDelegationChain(messages: Message[], chainId: string, description?: string): void {
+  if (chainId === '') return
+  if (description) {
+    const byDescription = messages.find(
+      (m) =>
+        isTaskToolRow(m) &&
+        typeof m.toolInput === 'string' &&
+        m.toolInput.includes(description),
+    )
+    if (byDescription) {
+      byDescription.chainId = chainId
+      return
+    }
+  }
+  const candidate = messages.find((m) => isTaskToolRow(m))
+  if (candidate) {
+    candidate.chainId = chainId
+  }
+}
+
+/**
+ * retireStartedDelegationRows removes the in-flight `delegation_started`
+ * rows for a terminal delegation row's chain (exact chainId match).
+ * One delegation renders exactly one card: the started card while the
+ * child runs, the terminal row's completed card once it finishes — the
+ * started row must not survive its chain's completion (no eternal
+ * spinner / Live badge / ticking timer). Before removal the observed
+ * duration is preserved on the terminal row as durationMs so the
+ * completed card keeps its elapsed chip without the started row.
+ */
+function retireStartedDelegationRows(messages: Message[], terminal: Message): void {
+  const chainId = terminal.chainId
+  if (typeof chainId !== 'string' || chainId === '') return
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const row = messages[i]
+    if (!row || row.role !== 'delegation_started' || row.chainId !== chainId) continue
+    if (terminal.durationMs === undefined) {
+      const startTs = Date.parse(row.timestamp)
+      const endTs = Date.parse(terminal.timestamp)
+      if (!Number.isNaN(startTs) && !Number.isNaN(endTs) && endTs >= startTs) {
+        terminal.durationMs = endTs - startTs
+      }
+    }
+    messages.splice(i, 1)
+  }
+}
+
+/**
+ * reconcileDelegationRows re-establishes the delegation single-surface
+ * invariant over a freshly loaded message history: every delegation row
+ * links its chainId onto the `task` rows that spawned it, and every
+ * terminal `delegation` row retires the matching `delegation_started`
+ * row. Run on every cold-load path (loadSessionMessages,
+ * reconcileFromBackend, restoreStateFromBackend) so a reloaded thread
+ * renders one delegation card per chain with no bare task card beside
+ * it. Returns a new array; the input is not spliced.
+ */
+function reconcileDelegationRows(messages: Message[]): Message[] {
+  const out = [...messages]
+  for (const row of messages) {
+    if (row.role !== 'delegation_started' && row.role !== 'delegation') continue
+    if (typeof row.chainId !== 'string' || row.chainId === '') continue
+    linkDelegationChain(out, row.chainId, row.description)
+    if (row.role === 'delegation') {
+      retireStartedDelegationRows(out, row)
+    }
+  }
+  return out
+}
+
 export const useChatStore = defineStore('chat', {
   state: () => ({
     availableAgentDetails: [] as Agent[],
@@ -1585,8 +1684,10 @@ export const useChatStore = defineStore('chat', {
         }
         persistSessionId(sessionForAgent.id)
         const loadedForAgent = await fetchSessionMessages(sessionForAgent.id)
-        this.messages = loadedForAgent.map((m) =>
-          m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+        this.messages = reconcileDelegationRows(
+          loadedForAgent.map((m) =>
+            m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+          ),
         )
         const todoStore = useTodoStore()
         todoStore.setCurrentSession(sessionForAgent.id)
@@ -1624,8 +1725,10 @@ export const useChatStore = defineStore('chat', {
       }
       persistSessionId(session.id)
       const loadedForSession = await fetchSessionMessages(session.id)
-      this.messages = loadedForSession.map((m) =>
-        m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+      this.messages = reconcileDelegationRows(
+        loadedForSession.map((m) =>
+          m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+        ),
       )
       const todoStore = useTodoStore()
       todoStore.setCurrentSession(session.id)
@@ -2429,8 +2532,14 @@ export const useChatStore = defineStore('chat', {
         // Backend history has no notion of a 'running' state; leaving
         // status === undefined allows handleContentChunk to wrongly adopt
         // a prior turn's assistant as the chunk target on the next send.
-        this.messages = loaded.map((m) =>
-          m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+        // reconcileDelegationRows then re-establishes the delegation
+        // single-surface invariant (chain identity on `task` rows,
+        // started rows retired for completed chains) so a cold reload
+        // renders one delegation card per chain.
+        this.messages = reconcileDelegationRows(
+          loaded.map((m) =>
+            m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+          ),
         )
 
         // Sync the todoStore: switch its active session and rebuild the
@@ -2594,7 +2703,11 @@ export const useChatStore = defineStore('chat', {
           )
         : []
 
-      this.messages = [...sealedBackend, ...optimisticOrphans, ...inFlightLocalOrphans]
+      this.messages = reconcileDelegationRows([
+        ...sealedBackend,
+        ...optimisticOrphans,
+        ...inFlightLocalOrphans,
+      ])
 
       // Recompute per-tool elapsed times from the freshly loaded backend
       // timestamps. The backend persists timestamps but NOT the
@@ -3053,6 +3166,17 @@ export const useChatStore = defineStore('chat', {
             }
           } else {
             this.messages.push(row)
+          }
+          const stored = idx >= 0 ? this.messages[idx] : row
+          if (
+            (stored.role === 'delegation_started' || stored.role === 'delegation') &&
+            typeof stored.chainId === 'string' &&
+            stored.chainId !== ''
+          ) {
+            linkDelegationChain(this.messages, stored.chainId, stored.description)
+            if (stored.role === 'delegation') {
+              retireStartedDelegationRows(this.messages, stored)
+            }
           }
         }
 
@@ -4106,6 +4230,25 @@ export const useChatStore = defineStore('chat', {
     },
 
     applyDelegationEvent(event: SSEDelegationEvent): void {
+      // Delegation single-surface (Sept 2026 UI audit, issue 1) —
+      // establish the chain identity on the `task` tool rows first, then
+      // retire the in-flight card row when the event reports the chain
+      // completed: the completed surface is the terminal `delegation`
+      // row the poll merge lands, so a `delegation_started` row must
+      // never survive its chain's completion. Terminal events stop here
+      // — their metadata belongs to the terminal row, and falling
+      // through would either re-create a started row or stamp
+      // delegation fields onto an unrelated running assistant.
+      if (event.chainId !== undefined) {
+        linkDelegationChain(this.messages, event.chainId, event.description)
+        if (event.status === 'completed') {
+          const chainId = event.chainId
+          this.messages = this.messages.filter(
+            (m) => !(m.role === 'delegation_started' && m.chainId === chainId),
+          )
+          return
+        }
+      }
       // Prefer matching by chain_id or target_agent — those identify a
       // specific in-flight delegation. Fall back to the in-flight
       // streaming assistant (status === 'running'), NOT any non-completed

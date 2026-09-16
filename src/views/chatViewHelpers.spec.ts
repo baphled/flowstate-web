@@ -118,6 +118,52 @@ describe("collapseToolPairs", () => {
     expect(result[0]).toBe(messages[1]); // same reference, nothing merged
   });
 
+  /**
+   * Delegation single-surface (Sept 2026 UI audit, issue 1) — the
+   * chatStore stamps the delegation chainId onto the `task` tool_call
+   * row at ingestion time. The pair collapse must carry that identity
+   * onto the surviving result row exactly like toolInput, so the merged
+   * row stays delegation-linked (and therefore renders no generic task
+   * card — the delegation card owns the lineage).
+   */
+  it("carries the suppressed tool_call's chainId onto the paired tool_result", () => {
+    const messages: Message[] = [
+      makeToolMessage("1", "tool_call", "task", {
+        toolInput: '{"agent":"executor"}',
+        chainId: "chain-1",
+      }),
+      makeToolMessage("2", "tool_result", "task", { content: "done" }),
+    ];
+    const result = collapseToolPairs(messages);
+    expect(result).toHaveLength(1);
+    expect(result[0].chainId).toBe("chain-1");
+    expect(messages[1].chainId).toBeUndefined();
+  });
+
+  it("keeps the tool_result's own chainId when it already has one", () => {
+    const messages: Message[] = [
+      makeToolMessage("1", "tool_call", "task", { chainId: "chain-call" }),
+      makeToolMessage("2", "tool_result", "task", {
+        content: "done",
+        chainId: "chain-result",
+      }),
+    ];
+    const result = collapseToolPairs(messages);
+    expect(result).toHaveLength(1);
+    expect(result[0].chainId).toBe("chain-result");
+  });
+
+  it("collapses a pair whose tool_call only carries a chainId (no toolInput)", () => {
+    const messages: Message[] = [
+      makeToolMessage("1", "tool_call", "task", { chainId: "chain-1" }),
+      makeToolMessage("2", "tool_result", "task", { content: "done" }),
+    ];
+    const result = collapseToolPairs(messages);
+    expect(result).toHaveLength(1);
+    expect(result[0].role).toBe("tool_result");
+    expect(result[0].chainId).toBe("chain-1");
+  });
+
   it("keeps a tool_call when no matching tool_result follows", () => {
     const messages: Message[] = [makeToolMessage("1", "tool_call", "write")];
     const result = collapseToolPairs(messages);

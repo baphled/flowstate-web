@@ -1065,7 +1065,13 @@ describe('ChatView agent-activity indicator', () => {
     expect(wrapper.find('[data-testid="agent-activity-model"]').exists()).toBe(false)
   })
 
-  it('shows concurrent delegated agent actions in the activity indicator when delegations are in-flight', async () => {
+  it('does not duplicate delegation activity in the indicator — the delegation card is the single surface', async () => {
+    // Delegation single-surface (Sept 2026 UI audit, issue 1): the
+    // in-flight delegation card in the thread carries the delegated
+    // agent's name, latest tool and content. The activity indicator no
+    // longer mirrors that data (the removed activeDelegations listing
+    // was a second delegation surface) — while delegations are
+    // in-flight the indicator falls back to the model info chip.
     const wrapper = mount(ChatView, {
       global: {
         stubs: {
@@ -1079,7 +1085,8 @@ describe('ChatView agent-activity indicator', () => {
     const chatStore = useChatStore()
     chatStore.isStreaming = true
     chatStore.agentId = 'team-lead'
-    // Add two concurrent active delegations
+    chatStore.currentModelId = 'glm-4.6'
+    chatStore.currentProviderId = 'zai'
     const msg1 = {
       id: 'msg-1',
       role: 'delegation_started',
@@ -1103,18 +1110,10 @@ describe('ChatView agent-activity indicator', () => {
     ;(chatStore as any).messages = [msg1, msg2]
     await wrapper.vm.$nextTick()
 
-    const container = wrapper.find('[data-testid="agent-activity-delegations"]')
-    expect(container.exists()).toBe(true)
-
-    const chips = wrapper.findAll('[data-testid="agent-activity-delegation"]')
-    expect(chips).toHaveLength(2)
-    expect(chips[0].text()).toContain('planner')
-    expect(chips[0].text()).toContain('read')
-    expect(chips[1].text()).toContain('coder')
-    expect(chips[1].text()).toContain('write')
-
-    // Model fallback chip should NOT appear when delegations are active
-    expect(wrapper.find('[data-testid="agent-activity-model"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="agent-activity-delegations"]').exists()).toBe(false)
+    const modelChip = wrapper.find('[data-testid="agent-activity-model"]')
+    expect(modelChip.exists()).toBe(true)
+    expect(modelChip.text()).toContain('glm-4.6')
   })
 
   it('shows the agent-activity-indicator for the active session when its per-session streamingFor reports isStreaming=true (no global flag)', async () => {

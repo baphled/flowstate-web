@@ -46,6 +46,14 @@ export function resolveAgentName(
  * renders one rich block per tool invocation instead of two. Pairing is by
  * adjacency and toolName equality; tool_error and unmatched tool_call rows
  * are preserved.
+ *
+ * The merged result row also inherits the suppressed tool_call's
+ * `chainId` (when the result does not already carry one). The chatStore
+ * stamps the delegation chainId onto `task` tool_call rows at ingestion
+ * time; without this propagation the surviving result row would lose its
+ * delegation identity and render a generic task card beside the
+ * delegation card — the delegation card is the single surface for a
+ * delegation-linked invocation.
  */
 export function collapseToolPairs(messages: Message[]): Message[] {
   const out: Message[] = [];
@@ -64,8 +72,15 @@ export function collapseToolPairs(messages: Message[]): Message[] {
         // result — as an immutable copy, never clobbering args the result
         // already has — so renderers can resolve the full command, file
         // path, and written contents (e.g. WriteTool's file body).
-        if (current.toolInput !== undefined && next.toolInput === undefined) {
-          out.push({ ...next, toolInput: current.toolInput });
+        if (
+          (current.toolInput !== undefined && next.toolInput === undefined) ||
+          (current.chainId !== undefined && next.chainId === undefined)
+        ) {
+          out.push({
+            ...next,
+            toolInput: next.toolInput ?? current.toolInput,
+            chainId: next.chainId ?? current.chainId,
+          });
           i += 1; // the merged result row is consumed here
         }
         continue;

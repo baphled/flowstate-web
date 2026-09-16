@@ -99,11 +99,44 @@ const isDelegationStarted = computed(
 );
 const isDelegation = computed(() => props.message.role === "delegation");
 
+// Delegation single-surface (Sept 2026 UI audit, issue 1). A `task`
+// tool invocation that carries a chainId belongs to a delegation chain,
+// and the delegation card (delegation_started in-flight / `delegation`
+// terminal) is the ONLY surface for that lineage — the generic task
+// tool card must never render for it. The chatStore establishes the
+// identity at ingestion time (poll merge, delegation events, cold-load
+// reconcile); this predicate is purely row-local and deliberately does
+// NOT inspect sibling messages (no "suppress because another card
+// exists" logic — that pattern is banned).
+const isDelegationLinkedTaskCall = computed(
+  () =>
+    isToolInvocation.value &&
+    props.message.toolName === "task" &&
+    typeof props.message.chainId === "string" &&
+    props.message.chainId !== "",
+);
+
+// In-flight gate for the started card: a delegation_started row whose
+// status was sealed to 'completed' (handleStreamDone, or the SSE
+// delegation event for the chain's completion) must not render the
+// spinner + Live + ticking-timer card. The completed surface is the
+// terminal `delegation` row's card.
+const isDelegationStartedInFlight = computed(
+  () => isDelegationStarted.value && props.message.status !== "completed",
+);
+
 // Elapsed time for a completed delegation message, computed by finding
 // the paired delegation_started message (matched via chainId) and using
 // the delta between their timestamps. Returns undefined when there is no
 // matching started message (edge case: orphaned delegation on reload).
+// The store stamps durationMs on the terminal row when it retires the
+// started row (single-surface fix) and on cold-load reconcile, so the
+// duration chip survives without the started row; the timestamp scan is
+// the fallback while the started row is still in the list.
 const elapsedForDelegation = computed(() => {
+  if (typeof props.message.durationMs === "number") {
+    return Math.max(0, Math.floor(props.message.durationMs / 1000));
+  }
   const chainId = props.message.chainId;
   if (!chainId) return undefined;
   const started = chatStore.messages.find(
@@ -325,9 +358,9 @@ const isPlain = computed(
 // one render branch matching.
 const hasRenderableContent = computed(
   () =>
-    isToolInvocation.value ||
+    (isToolInvocation.value && !isDelegationLinkedTaskCall.value) ||
     isToolError.value ||
-    isDelegationStarted.value ||
+    isDelegationStartedInFlight.value ||
     isDelegation.value ||
     isThinking.value ||
     isThinkingOnlyDegraded.value ||
@@ -926,7 +959,7 @@ async function handleRegenerate(): Promise<void> {
       (left accent border, elevated background) as tool invocations.
     -->
     <div
-      v-else-if="isDelegationStarted"
+      v-else-if="isDelegationStartedInFlight"
       class="delegation-card delegation-card--inflight"
       data-testid="delegation-started-card"
     >
