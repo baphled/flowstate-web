@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import MarkdownIt from "markdown-it";
 import {
   ensureHighlighterLoaded,
@@ -337,12 +337,46 @@ const renderedHtml = computed(() => {
   // computed re-evaluates with the real highlight callback wired
   // through MarkdownIt.
   void highlighterVersion.value;
-  const raw = md.render(props.content);
+  const raw = md.render(paintContent.value);
   // Allow-list filter — Vue's reactivity tracks chat.currentSessionId
   // through the closure, so a session switch re-evaluates the computed
   // and re-applies the constraint with the new active id.
   return applyImageAllowList(raw, chat.currentSessionId);
 });
+
+// Streaming re-render coalescing. During streaming, `props.content`
+// updates on every chunk and `renderedHtml` (a computed over that
+// prop) would re-run the full markdown-it parse + DOM allow-list
+// pass on each token — O(n²) work over a stream. We instead render
+// from a `paintContent` ref that trails the prop on a ~120 ms
+// trailing timer: bursts of chunks collapse into one re-parse, and
+// every timer tick flushes the *latest* prop value so the final
+// rendered output is byte-identical to the unthrottled path.
+// Non-streaming updates (final content set after stream end, or the
+// Shiki highlighterVersion bump above) still flush immediately.
+const RENDER_COALESCE_MS = 120;
+const paintContent = ref(props.content);
+let renderTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPaint(): void {
+  if (renderTimer !== null) {
+    clearTimeout(renderTimer);
+    renderTimer = null;
+  }
+  paintContent.value = props.content;
+}
+
+watch(
+  () => props.content,
+  () => {
+    if (renderTimer !== null) return;
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      paintContent.value = props.content;
+    }, RENDER_COALESCE_MS);
+  },
+  { flush: "post" },
+);
 
 // Per-block copy affordance handler. The fence renderer emits the
 // copy button as static HTML inside the v-html surface, so the click
@@ -390,6 +424,10 @@ function onCopyClick(event: MouseEvent): void {
 }
 
 onBeforeUnmount(() => {
+  // Streaming coalescing timer cleanup — a pending trailing flush
+  // after unmount would be a leak / late write. flushPaint both
+  // clears the pending timer and applies the latest prop value.
+  flushPaint();
   copiedTimers.forEach((t) => clearTimeout(t));
   copiedTimers.clear();
   if (unsubscribeReady !== null) {
