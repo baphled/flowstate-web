@@ -1,10 +1,16 @@
 import { createRouter, createWebHistory } from "vue-router";
 import ChatView from "@/views/ChatView.vue";
-import SwarmView from "@/views/SwarmView.vue";
-import SettingsView from "@/views/SettingsView.vue";
-import AgentInfoView from "@/views/AgentInfoView.vue";
-import LoginView from "@/views/LoginView.vue";
-import ProviderQuotaDashboardView from "@/views/ProviderQuotaDashboardView.vue";
+
+// Route-level code splitting: the chat surface is the landing experience
+// and stays in the entry chunk; every other view is lazy-loaded so the
+// Shiki grammar set, settings forms, and dashboard tables are paid for
+// only on navigation.
+const SwarmView = () => import("@/views/SwarmView.vue");
+const SettingsView = () => import("@/views/SettingsView.vue");
+const AgentInfoView = () => import("@/views/AgentInfoView.vue");
+const LoginView = () => import("@/views/LoginView.vue");
+const ProviderQuotaDashboardView = () =>
+  import("@/views/ProviderQuotaDashboardView.vue");
 
 const router = createRouter({
   history: createWebHistory(),
