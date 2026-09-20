@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useChatStore } from '@/stores/chatStore'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { showToast } from '@/composables/useToast'
 import Icon from '@/components/common/Icon.vue'
 import FuzzySearchModal from '@/components/common/FuzzySearchModal.vue'

@@ -24,6 +24,8 @@ function baseSnapshot(variant: "rate_limit" | "token_spend" | "not_configured"):
     rateLimit: null,
     tokenSpend: null,
     notConfigured: null,
+    rateLimitedUntil: "",
+    status: "healthy",
   };
 }
 
