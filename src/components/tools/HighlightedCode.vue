@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import CopyButton from "./CopyButton.vue";
 import {
   ensureHighlighterLoaded,
   highlightCode,
-  onHighlighterReady,
+  highlighterVersionRef,
 } from "@/lib/markdownHighlighter";
 
 defineOptions({ name: "HighlightedCode" });
@@ -27,9 +27,7 @@ const props = defineProps<{
  *  truncation/scroll and the toggle would fight it). */
 const TRUNCATION_LIMIT = 5000;
 
-const highlighterVersion = ref(0);
 const showAll = ref(false);
-let unsubscribeReady: (() => void) | null = null;
 
 /** True when the raw text is JSON that is already multi-line formatted —
  *  re-stringifying it would only churn the indentation the model or the
@@ -89,9 +87,11 @@ const displayCode = computed(() => {
 });
 
 const highlightedHtml = computed<string | null>(() => {
-  // Touch the version counter so this recomputes when the lazy-loaded
-  // Shiki highlighter resolves (see onHighlighterReady below).
-  void highlighterVersion.value;
+  // Read the module-level reactive version counter so this
+  // recomputes when the lazy-loaded Shiki resources resolve —
+  // race-free (any increment re-evaluates, regardless of timing
+  // relative to mount).
+  void highlighterVersionRef.value;
   return highlightCode(displayCode.value, detectedLang.value);
 });
 
@@ -105,19 +105,9 @@ function toggleShowAll(): void {
 }
 
 onMounted(() => {
-  unsubscribeReady = onHighlighterReady(() => {
-    highlighterVersion.value += 1;
-  });
   // Fire-and-forget — kick off the lazy Shiki load in the background.
-  // The version bump above triggers the re-render once it lands.
+  // The module-level version counter re-triggers highlightedHtml.
   void ensureHighlighterLoaded();
-});
-
-onUnmounted(() => {
-  if (unsubscribeReady !== null) {
-    unsubscribeReady();
-    unsubscribeReady = null;
-  }
 });
 </script>
 

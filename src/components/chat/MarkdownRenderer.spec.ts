@@ -3,7 +3,10 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import { setActivePinia, createPinia } from "pinia";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
-import { ensureHighlighterLoaded } from "@/lib/markdownHighlighter";
+import {
+  ensureHighlighterLoaded,
+  ensureLangLoaded,
+} from "@/lib/markdownHighlighter";
 import { useChatStore } from "@/stores/chatStore";
 
 describe("MarkdownRenderer", () => {
@@ -82,6 +85,9 @@ describe("MarkdownRenderer", () => {
           content: "```typescript\nconst answer: number = 42;\n```",
         },
       });
+      await ensureLangLoaded("typescript");
+      await flushPromises();
+      await nextTick();
       await flushPromises();
 
       const html = wrapper.html();
@@ -110,6 +116,9 @@ describe("MarkdownRenderer", () => {
           content: '```bash\necho "hello world"\n```',
         },
       });
+      await ensureLangLoaded("bash");
+      await flushPromises();
+      await nextTick();
       await flushPromises();
 
       expect(wrapper.html()).toContain("shiki");
@@ -161,6 +170,9 @@ describe("MarkdownRenderer", () => {
           content: "```typescript\nconst answer: number = 42;\n```",
         },
       });
+      await ensureLangLoaded("typescript");
+      await flushPromises();
+      await nextTick();
       await flushPromises();
 
       const html = wrapper.html();

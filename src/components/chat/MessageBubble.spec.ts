@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createRouter, createMemoryHistory } from "vue-router";
-import { defineComponent, h } from "vue";
+import { defineComponent, h, nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import MessageBubble from "./MessageBubble.vue";
 import type { Message } from "@/types";
 import { registerTool } from "@/tools/toolRegistry";
 import { useChatStore } from "@/stores/chatStore";
-import { ensureHighlighterLoaded } from "@/lib/markdownHighlighter";
+import {
+  ensureHighlighterLoaded,
+  ensureLangLoaded,
+} from "@/lib/markdownHighlighter";
 import { _resetNowSharedState } from "@/composables/useNow";
 
 // Mock chat store
@@ -222,6 +225,12 @@ describe("MessageBubble", () => {
           content: "```typescript\nconst answer: number = 42;\n```",
         }),
       );
+      await ensureLangLoaded("typescript");
+      // Cover the core→grammar→ready-pulse→re-render chain: the
+      // grammar loads on demand after mount, so give the ready pulse
+      // enough microtask/tick rounds to re-tokenise.
+      await flushPromises();
+      await nextTick();
       await flushPromises();
 
       const html = wrapper.html();

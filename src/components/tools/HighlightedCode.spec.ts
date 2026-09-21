@@ -1,21 +1,29 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import HighlightedCode from "./HighlightedCode.vue";
 
 /**
  * Unit spec for HighlightedCode. The markdownHighlighter module is mocked
  * so the Shiki lazy-load state is fully deterministic: `highlightCode`
- * returns whatever the test wants and the onHighlighterReady callback is
- * captured and fired manually to simulate the async load completing.
+ * returns whatever the test wants and the reactive version counter
+ * (highlighterVersionRef) is incremented manually to simulate the async
+ * load completing — the same race-free channel the component reads.
  */
-const markdownHighlighter = vi.hoisted(() => ({
-  highlightCode: vi.fn<(code: string, lang: string) => string | null>(),
-  onHighlighterReady: vi.fn<(cb: () => void) => () => void>(
-    () => () => undefined,
-  ),
-  ensureHighlighterLoaded: vi.fn<() => Promise<void>>(() => Promise.resolve()),
-}));
+const { versionRef, markdownHighlighter } = await vi.hoisted(async () => {
+  const { ref } = await import("vue");
+  const versionRef = ref(0);
+  const markdownHighlighter = {
+    highlightCode: vi.fn<(code: string, lang: string) => string | null>(),
+    onHighlighterReady: vi.fn<(cb: () => void) => () => void>(
+      () => () => undefined,
+    ),
+    ensureHighlighterLoaded: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+    getHighlighterVersion: vi.fn<() => number>(() => versionRef.value),
+    highlighterVersionRef: versionRef,
+  };
+  return { versionRef, markdownHighlighter };
+});
 
 vi.mock("@/lib/markdownHighlighter", () => markdownHighlighter);
 
@@ -142,13 +150,20 @@ describe("HighlightedCode", () => {
       true,
     );
 
-    const readyCallback = markdownHighlighter.onHighlighterReady.mock.calls[0][0];
-    markdownHighlighter.highlightCode.mockReturnValue(
-      '<pre class="shiki"><code><span class="line"><span style="--shiki-dark:#CB7676">const</span> x = 1;</span></code></pre>',
+    // Simulate the async highlighter finishing: bump the version counter
+    // (the reactive channel the component watches) and make the mocked
+    // highlightCode return Shiki HTML now that the highlighter is "ready".
+    versionRef.value += 1;
+    markdownHighlighter.highlightCode.mockImplementation(() =>
+      versionRef.value > 0
+        ? '<pre class="shiki"><code><span>const x = 1;</span></code></pre>'
+        : null,
     );
-    readyCallback();
     await nextTick();
     await nextTick();
+    await flushPromises();
+    await nextTick();
+    await flushPromises();
 
     expect(wrapper.find('[data-testid="highlighted-code-plain"]').exists()).toBe(
       false,

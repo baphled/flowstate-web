@@ -4,7 +4,7 @@ import MarkdownIt from "markdown-it";
 import {
   ensureHighlighterLoaded,
   highlightCode,
-  onHighlighterReady,
+  highlighterVersionRef,
 } from "@/lib/markdownHighlighter";
 import { useChatStore } from "@/stores/chatStore";
 
@@ -156,22 +156,17 @@ md.validateLink = (url: string): boolean => {
   return ALLOWED_SCHEMES.has(scheme);
 };
 
-// B1: Reactive version counter to trigger a re-render after the
-// lazy-loaded Shiki highlighter resolves. Before Shiki is ready,
-// `highlightCode` returns `null` and the fence renderer falls back
-// to plain `<pre><code>`. The first time `ensureHighlighterLoaded`
-// completes (typically <100 ms after first render), this counter
-// increments and Vue re-runs `renderedHtml` so the same content
-// re-renders with tokenised code blocks.
-const highlighterVersion = ref(0);
-let unsubscribeReady: (() => void) | null = null;
-
+// B1: Re-render signal after the lazy-loaded Shiki highlighter
+// resolves. The render computed reads the module-level reactive
+// version counter directly (`void highlighterVersionRef.value`), so
+// ANY completed load — core, grammar, or theme — re-evaluates it
+// regardless of when it lands relative to mount. This replaced an
+// onHighlighterReady listener whose pulse could fire before the
+// component subscribed (a listener-registration race that left the
+// first tokenised paint permanently missed).
 onMounted(() => {
-  unsubscribeReady = onHighlighterReady(() => {
-    highlighterVersion.value += 1;
-  });
-  // Fire-and-forget — load Shiki in the background. The
-  // `highlighterVersion` increment above wakes us up when it lands.
+  // Fire-and-forget — load Shiki in the background. The version
+  // counter bump from the module wakes the render computed.
   void ensureHighlighterLoaded();
 });
 
@@ -336,7 +331,7 @@ const renderedHtml = computed(() => {
   // when Shiki finishes loading and the version bumps, the
   // computed re-evaluates with the real highlight callback wired
   // through MarkdownIt.
-  void highlighterVersion.value;
+  void highlighterVersionRef.value;
   const raw = md.render(paintContent.value);
   // Allow-list filter — Vue's reactivity tracks chat.currentSessionId
   // through the closure, so a session switch re-evaluates the computed
@@ -430,10 +425,6 @@ onBeforeUnmount(() => {
   flushPaint();
   copiedTimers.forEach((t) => clearTimeout(t));
   copiedTimers.clear();
-  if (unsubscribeReady !== null) {
-    unsubscribeReady();
-    unsubscribeReady = null;
-  }
 });
 </script>
 
