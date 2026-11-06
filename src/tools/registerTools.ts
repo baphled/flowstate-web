@@ -1,5 +1,6 @@
 import BashTool from '@/components/tools/BashTool.vue'
 import CompactStatusTool from '@/components/tools/CompactStatusTool.vue'
+import ExecTool from '@/components/tools/ExecTool.vue'
 import EditTool from '@/components/tools/EditTool.vue'
 import GenericTool from '@/components/tools/GenericTool.vue'
 import GlobTool from '@/components/tools/GlobTool.vue'
@@ -22,6 +23,7 @@ function registerIfNeeded(name: string, component: Component): void {
 
 export function registerTools(): void {
   registerIfNeeded('bash', BashTool)
+  registerIfNeeded('exec', ExecTool)
   registerIfNeeded('read', ReadTool)
   registerIfNeeded('write', WriteTool)
   registerIfNeeded('edit', EditTool)
