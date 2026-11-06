@@ -30,6 +30,9 @@
     </div>
 
     <ul v-else class="event-list" data-testid="swarm-event-list">
+      <li>
+        <SwarmRunTree />
+      </li>
       <li v-for="event in events" :key="event.id">
         <EventCard :event="event" />
       </li>
@@ -41,6 +44,7 @@
 import { computed, onMounted, onUnmounted } from "vue";
 import { useSwarmStore } from "@/stores/swarmStore";
 import EventCard from "@/components/swarm/EventCard.vue";
+import SwarmRunTree from "@/components/swarm/SwarmRunTree.vue";
 
 const swarmStore = useSwarmStore();
 const events = computed(() => swarmStore.events);

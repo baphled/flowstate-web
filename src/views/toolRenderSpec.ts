@@ -6,16 +6,27 @@ export interface ToolRenderSpec {
   body: string;
 }
 
-const primaryArgKeys: Record<string, string> = {
-  bash: "command",
-  read: "filePath",
-  write: "filePath",
-  edit: "filePath",
-  multiedit: "filePath",
-  apply_patch: "filePath",
-  glob: "pattern",
-  grep: "pattern",
-  skill_load: "name",
+// Candidate primary-arg keys per tool, in priority order. The backend
+// tools disagree on the path key (internal/tool/{write,read} use `path`,
+// edit uses `file`, multiedit uses `file_path`) — so every file tool
+// accepts all four aliases and the first non-empty string wins. glob and
+// grep keep `pattern` primary: their `path` arg is a base directory, not
+// the display value. Without an alias match the heading falls through to
+// the compact-JSON blob instead of showing the path.
+const primaryArgKeys: Record<string, readonly string[]> = {
+  bash: ["command"],
+  read: ["filePath", "file_path", "file", "path"],
+  write: ["filePath", "file_path", "file", "path"],
+  edit: ["filePath", "file_path", "file", "path"],
+  multiedit: ["filePath", "file_path", "file", "path"],
+  apply_patch: ["filePath", "file_path", "file", "path"],
+  glob: ["pattern"],
+  grep: ["pattern"],
+  skill_load: ["name"],
+  // Question Tool (Aug 2026) — the blocking clarifying-question tool's
+  // primary arg is the question text; show it as the heading so the
+  // dedicated QuestionTool renderer surfaces the actual question.
+  question: ["question"],
 };
 
 // preferredFallbackKeys mirrors the Go-side priority list in
@@ -47,18 +58,6 @@ const sensitiveKeySubstrings = [
 ];
 
 const redactedPlaceholder = "[REDACTED]";
-
-// truncateLen caps any rendered display value uniformly. Applies to bash
-// commands and the fallback path so MCP tools with huge JSON blobs cannot
-// blow up the card.
-const truncateLen = 80;
-
-function truncate(s: string): string {
-  if (s.length <= truncateLen) {
-    return s;
-  }
-  return s.slice(0, truncateLen) + "...";
-}
 
 function isSensitiveKey(key: string): boolean {
   const lower = key.toLowerCase();
@@ -112,18 +111,24 @@ function compactJSONFallback(args: Record<string, unknown>): string | null {
   if (parts.length === 0) {
     return null;
   }
-  return `{${parts.join(",")}}`;
+  // Rendered in full — never ellipsized. The subtitle wraps
+  // (overflow-wrap: anywhere in ToolBubble) so long blobs stay readable
+  // and no information is silently dropped.
+  const rendered = `{${parts.join(",")}}`;
+  return rendered === "" ? null : rendered;
 }
 
 function resolvePrimaryValue(
   toolName: string,
   args: Record<string, unknown>,
 ): string | null {
-  const primary = primaryArgKeys[toolName];
-  if (primary) {
-    const raw = args[primary];
-    if (typeof raw === "string" && raw !== "") {
-      return redactIfSensitive(primary, raw);
+  const primaryKeys = primaryArgKeys[toolName];
+  if (primaryKeys) {
+    for (const key of primaryKeys) {
+      const raw = args[key];
+      if (typeof raw === "string" && raw !== "") {
+        return redactIfSensitive(key, raw);
+      }
     }
   }
 
@@ -137,17 +142,15 @@ function resolvePrimaryValue(
   return compactJSONFallback(args);
 }
 
+/**
+ * Tool titles show the full command/path for every tool; only the
+ * compact-JSON fallback blob keeps a cap (see compactJSONFallback).
+ */
 function formatHeadingValue(
-  toolName: string,
+  _toolName: string,
   rawValue: string,
 ): string {
-  // Bash commands are never truncated so the full command is always visible.
-  // All other tools keep the 80-char cap to prevent huge JSON blobs from
-  // blowing up the card.
-  if (toolName === "bash") {
-    return rawValue;
-  }
-  return truncate(rawValue);
+  return rawValue;
 }
 
 function resolveHeading(

@@ -1,8 +1,12 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
+import { nextTick } from "vue";
 import { setActivePinia, createPinia } from "pinia";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
-import { ensureHighlighterLoaded } from "@/lib/markdownHighlighter";
+import {
+  ensureHighlighterLoaded,
+  ensureLangLoaded,
+} from "@/lib/markdownHighlighter";
 import { useChatStore } from "@/stores/chatStore";
 
 describe("MarkdownRenderer", () => {
@@ -81,6 +85,9 @@ describe("MarkdownRenderer", () => {
           content: "```typescript\nconst answer: number = 42;\n```",
         },
       });
+      await ensureLangLoaded("typescript");
+      await flushPromises();
+      await nextTick();
       await flushPromises();
 
       const html = wrapper.html();
@@ -109,6 +116,9 @@ describe("MarkdownRenderer", () => {
           content: '```bash\necho "hello world"\n```',
         },
       });
+      await ensureLangLoaded("bash");
+      await flushPromises();
+      await nextTick();
       await flushPromises();
 
       expect(wrapper.html()).toContain("shiki");
@@ -160,6 +170,9 @@ describe("MarkdownRenderer", () => {
           content: "```typescript\nconst answer: number = 42;\n```",
         },
       });
+      await ensureLangLoaded("typescript");
+      await flushPromises();
+      await nextTick();
       await flushPromises();
 
       const html = wrapper.html();
@@ -308,15 +321,25 @@ describe("MarkdownRenderer", () => {
   });
 
   it("updates rendered output when the content prop changes", async () => {
-    const wrapper = mount(MarkdownRenderer, {
-      props: { content: "# Initial" },
-    });
+    // The component coalesces stream paints on a ~120ms trailing timer,
+    // so a prop change isn't reflected synchronously. Advance the timer
+    // and flush the Vue render queue before asserting.
+    vi.useFakeTimers();
+    try {
+      const wrapper = mount(MarkdownRenderer, {
+        props: { content: "# Initial" },
+      });
 
-    expect(wrapper.find("h1").text()).toBe("Initial");
+      expect(wrapper.find("h1").text()).toBe("Initial");
 
-    await wrapper.setProps({ content: "# Updated" });
+      await wrapper.setProps({ content: "# Updated" });
+      vi.advanceTimersByTime(150);
+      await nextTick();
 
-    expect(wrapper.find("h1").text()).toBe("Updated");
+      expect(wrapper.find("h1").text()).toBe("Updated");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   describe("XSS link sanitization (M6)", () => {

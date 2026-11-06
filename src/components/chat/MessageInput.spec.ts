@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import MessageInput from './MessageInput.vue'
 import { useChatStore } from '@/stores/chatStore'
 import type { Agent, Swarm } from '@/types'
+import * as api from '@/api'
 
 // Chat Attachments Backend PR1 (May 2026) — the composer's
 // uploadPendingAttachments() now POSTs to the real backend via
@@ -22,6 +23,19 @@ vi.mock('@/api', async () => {
         originalFilename: f.name,
       })),
     ),
+    // Session Cancel (Aug 2026) — DELETE /sessions/{sid}/turns/{tid}
+    // seam for the Escape-Escape / Stop-button cancel cascade. Mocked
+    // so P1-5 and B5 can assert the DELETE fires without a real fetch.
+    cancelTurn: vi.fn(async (sessionId: string, turnId: string) => ({
+      turn_id: turnId,
+      session_id: sessionId,
+      status: 'cancelled',
+      started_at: '',
+      completed_at: '',
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [],
+    })),
   }
 })
 
@@ -590,6 +604,10 @@ describe('MessageInput — prompt history (B4)', () => {
 // the cancel cascade fires, not wait for the outer POST to drain. The
 // fix calls setSessionStreaming(sessionId, {isLoading: false, isStreaming: false})
 // right after disconnectSessionStream in handleEscapeKey.
+//
+// Session Cancel (Aug 2026): the confirmed chord ALSO fires the
+// server-side DELETE /sessions/{sid}/turns/{tid} so the engine stops —
+// the fix is no longer UI-cosmetic-only.
 describe('chatStore.handleEscapeKey — clears streaming state after cancel (P1-5)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -599,14 +617,9 @@ describe('chatStore.handleEscapeKey — clears streaming state after cancel (P1-
   })
 
   it('clears isStreaming/isLoading on confirmed escape-twice cancel', async () => {
-    // Phase-4-Commit-2 of "Turn-Based Post-Then-Poll Architecture
-    // (May 2026)" retired the DELETE /api/v1/sessions/{id}/stream
-    // cancel endpoint along with the SSE handler. Escape-Escape now
-    // clears the per-session UI gate immediately so the composer
-    // flips back to Send; the long-poll itself continues to drain
-    // on its own without a server-side cancel hop.
     const store = useChatStore()
     store.currentSessionId = 'sess-1'
+    store.lastPollTurnIdBySession['sess-1'] = 'turn-1'
     store.setSessionStreaming('sess-1', { isLoading: true, isStreaming: true })
     expect(store.streamingFor('sess-1')).toEqual({ isLoading: true, isStreaming: true })
 
@@ -620,20 +633,29 @@ describe('chatStore.handleEscapeKey — clears streaming state after cancel (P1-
     // isStreamingNow gate flips back to Send and queued prompts stop
     // accumulating.
     expect(store.streamingFor('sess-1')).toEqual({ isLoading: false, isStreaming: false })
+
+    // Session Cancel (Aug 2026): the confirmed chord fires the
+    // server-side DELETE against the in-flight turn id so the engine
+    // actually stops.
+    expect(vi.mocked(api.cancelTurn)).toHaveBeenCalledWith('sess-1', 'turn-1')
   })
 
-  it('clears streaming state without requiring a backend cancel', async () => {
-    // Phase-4-Commit-2 — the DELETE cancel endpoint is gone; the FE
-    // never fires a network request on Escape-Escape. Local UI state
-    // clears unconditionally so the user can resume composing.
+  it('clears streaming state and fires the server-side DELETE on confirmed escape-twice cancel', async () => {
+    // Session Cancel (Aug 2026) inverts the Phase-4-Commit-2 no-op:
+    // the FE now fires the DELETE /sessions/{sid}/turns/{tid} so the
+    // engine stops instead of draining to natural completion. Local UI
+    // state still clears unconditionally so the user can resume
+    // composing even if the DELETE fails (fire-and-forget).
     const store = useChatStore()
     store.currentSessionId = 'sess-2'
+    store.lastPollTurnIdBySession['sess-2'] = 'turn-2'
     store.setSessionStreaming('sess-2', { isLoading: true, isStreaming: true })
 
     await store.handleEscapeKey()
     await store.handleEscapeKey()
 
     expect(store.streamingFor('sess-2')).toEqual({ isLoading: false, isStreaming: false })
+    expect(vi.mocked(api.cancelTurn)).toHaveBeenCalledWith('sess-2', 'turn-2')
   })
 })
 
@@ -1235,6 +1257,84 @@ describe('MessageInput — drag overlay defensive reset (P1-6)', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="message-input-drag-overlay"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+/**
+ * Question-owns-input-region (Aug 2026 rework) — when a blocking
+ * question is pending the composer is REPLACED by the QuestionSelector
+ * (opencode CLI pattern); the textarea, send controls and attach
+ * button must not render until the question resolves.
+ */
+describe('MessageInput — question replaces composer', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function makeRequest(): import('@/api').TurnStateQuestionRequest {
+    return {
+      request_id: 'q-1',
+      tool_name: 'question',
+      question: 'Deploy now?',
+      options: ['Yes', 'No'],
+      allow_multiple: false,
+      status: 'pending',
+    }
+  }
+
+  it('hides the composer controls while a question is pending', async () => {
+    const store = useChatStore()
+    vi.spyOn(store, 'loadAgents').mockResolvedValue()
+    store.pendingQuestions['q-1'] = makeRequest()
+
+    const wrapper = mount(MessageInput, { attachTo: document.body })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="question-selector"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="message-input"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="send-button"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="attach-button"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('restores the composer after the question is answered', async () => {
+    const store = useChatStore()
+    vi.spyOn(store, 'loadAgents').mockResolvedValue()
+    store.pendingQuestions['q-1'] = makeRequest()
+
+    const wrapper = mount(MessageInput, { attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="message-input"]').exists()).toBe(false)
+
+    delete store.pendingQuestions['q-1']
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="question-selector"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="message-input"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="send-button"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('submitting from the selector routes through chatStore.answerQuestion', async () => {
+    const store = useChatStore()
+    vi.spyOn(store, 'loadAgents').mockResolvedValue()
+    store.pendingQuestions['q-1'] = makeRequest()
+    const answerSpy = vi.fn().mockResolvedValue(undefined)
+    store.answerQuestion = answerSpy
+
+    const wrapper = mount(MessageInput, { attachTo: document.body })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="question-selector-row-1"]').trigger('click')
+    await wrapper.find('[data-testid="question-selector-submit"]').trigger('click')
+    await flushPromises()
+
+    expect(answerSpy).toHaveBeenCalledWith('q-1', ['No'])
     wrapper.unmount()
   })
 })

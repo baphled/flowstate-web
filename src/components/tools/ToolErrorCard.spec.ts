@@ -6,6 +6,11 @@ const CopyButton = {
   template: '<span data-testid="copy-btn" />',
 };
 
+const HighlightedCode = {
+  props: ["code", "lang", "maxHeight"],
+  template: '<pre data-component="highlighted-code"><code>{{ code }}</code></pre>',
+};
+
 describe("ToolErrorCard", () => {
   it("renders the error shell with the expected attributes", () => {
     const wrapper = mount(ToolErrorCard, {
@@ -17,6 +22,7 @@ describe("ToolErrorCard", () => {
       global: {
         stubs: {
           CopyButton,
+          HighlightedCode,
         },
       },
     });
@@ -41,6 +47,7 @@ describe("ToolErrorCard", () => {
       global: {
         stubs: {
           CopyButton,
+          HighlightedCode,
         },
       },
     });
@@ -50,6 +57,8 @@ describe("ToolErrorCard", () => {
     expect(
       wrapper.get('[data-component="tool-error-details"]').text(),
     ).toContain("No such file or directory");
-    expect(wrapper.find('[data-testid="copy-btn"]').exists()).toBe(true);
+    expect(wrapper.find('[data-component="highlighted-code"]').exists()).toBe(
+      true,
+    );
   });
 });

@@ -55,6 +55,32 @@ describe("ToolBubble", () => {
     expect(wrapper.text()).toContain("Processing data...");
   });
 
+  /**
+   * CSS flexbox clip regression (collapsed trigger row). The collapsed
+   * subtitle is the only place a bash command is visible before expanding
+   * the card, so it must always show in full. The original bug: the row-flex
+   * header kept the flex default min-width: auto, so a long unbroken bash
+   * token overflowed the .tool-bubble (overflow: hidden) and the subtitle
+   * was hard-clipped. The fix makes the flex item shrinkable
+   * (min-width: 0) and lets the subtitle wrap (overflow-wrap: anywhere).
+   * This test pins the render path — the entire subtitle must reach the DOM
+   * un-truncated (guards against JS-side truncation being reintroduced).
+   */
+  it("renders the full subtitle un-truncated for long commands with unbroken tokens", () => {
+    const unbrokenToken = "x".repeat(120);
+    const subtitle = `deploy --path=/opt/flowstate/deployments/${unbrokenToken}/prod --tag=v1.2.3 --region=eu-west-2 --instance-count=42 --rolling-deploy --no-downtime --health-check=/health --health-check-interval=10s --timeout=300s --retries=3 --skip-confirmation`;
+    expect(subtitle.length).toBeGreaterThan(300);
+
+    const wrapper = mount(ToolBubble, {
+      props: {
+        ...defaultProps,
+        subtitle,
+      },
+    });
+
+    expect(wrapper.find(".tool-bubble__subtitle").text()).toBe(subtitle);
+  });
+
   it("toggles open state when clicking trigger", async () => {
     const wrapper = mount(ToolBubble, {
       props: defaultProps,

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import CopyButton from "./CopyButton.vue";
+import HighlightedCode from "./HighlightedCode.vue";
 import type { ToolRendererProps } from "./toolRendererProps";
 
 const props =
@@ -42,10 +42,9 @@ function toggleDetails(): void {
       class="tool-error-card__details"
       data-component="tool-error-details"
     >
-      <div class="tool-error-card__actions">
-        <CopyButton :text="props.body" />
+      <div class="tool-error-card__message">
+        <HighlightedCode :code="props.body" />
       </div>
-      <pre class="tool-error-card__message"><code>{{ props.body }}</code></pre>
     </div>
   </div>
 </template>
@@ -114,14 +113,7 @@ function toggleDetails(): void {
   padding: 0 1rem 1rem;
 }
 
-.tool-error-card__actions {
-  display: flex;
-  justify-content: flex-end;
-}
-
 .tool-error-card__message {
-  margin: 0;
-  padding: 0.85rem 1rem;
   border: 1px solid color-mix(in srgb, var(--error, #f7768e) 30%, transparent);
   border-radius: calc(var(--radius, 12px) - 4px);
   background: color-mix(
@@ -129,14 +121,6 @@ function toggleDetails(): void {
     var(--error, #f7768e) 7%,
     var(--surface-low, #1a1b26)
   );
-  color: var(--text-primary, #c0caf5);
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
-  font-size: 0.85rem;
-  line-height: 1.5;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
+  overflow: hidden;
 }
 </style>

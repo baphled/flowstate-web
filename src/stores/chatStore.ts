@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import type { Agent, Message, Model, QueuedPromptEntry, Session, SessionSummary, Swarm } from '@/types'
 import {
   cancelQueuedPrompt as apiCancelQueuedPrompt,
+  cancelTurn as apiCancelTurn,
   compactSessionNow,
   createSession,
   deleteSession as apiDeleteSession,
@@ -11,6 +12,7 @@ import {
   fetchSessions,
   fetchSwarms,
   fetchTurn,
+  answerQuestion as apiAnswerQuestion,
   grantPermission as apiGrantPermission,
   sendSessionMessage,
   truncateSessionMessages,
@@ -23,6 +25,7 @@ import {
   type SendSessionMessageQueuedResult,
   type TurnState,
   type TurnStatePermissionRequest,
+  type TurnStateQuestionRequest,
 } from '@/api'
 import { recordStreamEvent } from '@/lib/streamLog'
 import { exhaustivenessGuard, parseSSEPayload, type SSEDelegationEvent, type SSEEvent } from '@/lib/sseEvent'
@@ -452,6 +455,105 @@ function rowsShallowEqual(existing: Message, incoming: Partial<Message>): boolea
   return true
 }
 
+/**
+ * isTaskToolRow reports whether the message is a `task` tool invocation
+ * row that has not yet been linked to a delegation chain. The `task`
+ * tool is the delegation dispatcher, and the backend does not persist
+ * chain_id on its tool_call/tool_result rows, so an unlinked row is a
+ * delegation invocation whose identity still needs establishing.
+ */
+function isTaskToolRow(message: Message): boolean {
+  return (
+    (message.role === 'tool_call' || message.role === 'tool_result') &&
+    message.toolName === 'task' &&
+    message.chainId === undefined
+  )
+}
+
+/**
+ * linkDelegationChain stamps a delegation's chainId onto the `task` tool
+ * rows of the invocation that spawned the chain — store-side identity
+ * for the single-surface contract (the delegation card is the only
+ * chat surface for a delegation; the generic task tool card never
+ * renders for a linked row).
+ *
+ * Matching: prefer the unlinked `task` row whose toolInput carries the
+ * delegation's task description (the strongest identity available on a
+ * cold reload of a persisted thread); fall back to the FIRST unlinked
+ * `task` row — the engine emits tool_call(task) before the delegation
+ * row, so dispatch order === link order. Idempotent: already-linked
+ * rows are never re-stamped.
+ */
+function linkDelegationChain(messages: Message[], chainId: string, description?: string): void {
+  if (chainId === '') return
+  if (description) {
+    const byDescription = messages.find(
+      (m) =>
+        isTaskToolRow(m) &&
+        typeof m.toolInput === 'string' &&
+        m.toolInput.includes(description),
+    )
+    if (byDescription) {
+      byDescription.chainId = chainId
+      return
+    }
+  }
+  const candidate = messages.find((m) => isTaskToolRow(m))
+  if (candidate) {
+    candidate.chainId = chainId
+  }
+}
+
+/**
+ * retireStartedDelegationRows removes the in-flight `delegation_started`
+ * rows for a terminal delegation row's chain (exact chainId match).
+ * One delegation renders exactly one card: the started card while the
+ * child runs, the terminal row's completed card once it finishes — the
+ * started row must not survive its chain's completion (no eternal
+ * spinner / Live badge / ticking timer). Before removal the observed
+ * duration is preserved on the terminal row as durationMs so the
+ * completed card keeps its elapsed chip without the started row.
+ */
+function retireStartedDelegationRows(messages: Message[], terminal: Message): void {
+  const chainId = terminal.chainId
+  if (typeof chainId !== 'string' || chainId === '') return
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const row = messages[i]
+    if (!row || row.role !== 'delegation_started' || row.chainId !== chainId) continue
+    if (terminal.durationMs === undefined) {
+      const startTs = Date.parse(row.timestamp)
+      const endTs = Date.parse(terminal.timestamp)
+      if (!Number.isNaN(startTs) && !Number.isNaN(endTs) && endTs >= startTs) {
+        terminal.durationMs = endTs - startTs
+      }
+    }
+    messages.splice(i, 1)
+  }
+}
+
+/**
+ * reconcileDelegationRows re-establishes the delegation single-surface
+ * invariant over a freshly loaded message history: every delegation row
+ * links its chainId onto the `task` rows that spawned it, and every
+ * terminal `delegation` row retires the matching `delegation_started`
+ * row. Run on every cold-load path (loadSessionMessages,
+ * reconcileFromBackend, restoreStateFromBackend) so a reloaded thread
+ * renders one delegation card per chain with no bare task card beside
+ * it. Returns a new array; the input is not spliced.
+ */
+function reconcileDelegationRows(messages: Message[]): Message[] {
+  const out = [...messages]
+  for (const row of messages) {
+    if (row.role !== 'delegation_started' && row.role !== 'delegation') continue
+    if (typeof row.chainId !== 'string' || row.chainId === '') continue
+    linkDelegationChain(out, row.chainId, row.description)
+    if (row.role === 'delegation') {
+      retireStartedDelegationRows(out, row)
+    }
+  }
+  return out
+}
+
 export const useChatStore = defineStore('chat', {
   state: () => ({
     availableAgentDetails: [] as Agent[],
@@ -514,6 +616,26 @@ export const useChatStore = defineStore('chat', {
     // only ever read it via .has() in the component; Pinia handles
     // the reactivity through the action-write boundary.
     grantingPermissionRequests: new Set<string>(),
+    // Question Tool (Aug 2026) — mirror of pendingPermissionRequests
+    // for blocking clarifying questions. Keyed by request_id; the
+    // poll-diff in pollTurnUntilTerminal inserts pending entries and
+    // removes answered/timeout/absent ones. QuestionPrompt reads
+    // entries from this record.
+    pendingQuestions: {} as Record<string, TurnStateQuestionRequest>,
+    // Question Tool (Sept 2026 regression fix) — resolved questions by
+    // request_id. Populated optimistically by answerQuestion on a
+    // successful POST (so the answered chat card appears immediately,
+    // without waiting for the long-poll diff) and by the poll diff
+    // when it later observes the canonical answered/timeout entry
+    // (same key → merge, never a duplicate). QuestionTool reads the
+    // latched question text + answers from here; MessageBubble's
+    // fallback synthesis and chat-dedup suppression gate exclude
+    // entries present here.
+    answeredQuestions: {} as Record<string, TurnStateQuestionRequest>,
+    // Companion set of question request_ids currently in the
+    // optimistic "Submitting…" state — cleared by the diff (success)
+    // or the POST's failure branch (retry).
+    answeringQuestionRequests: new Set<string>(),
     // chainSessions — Bug Hunt (May 2026) sibling-confusion fix for the
     // in-thread delegation card.
     //
@@ -570,7 +692,7 @@ export const useChatStore = defineStore('chat', {
     // blocked: an earlier message is still in flight"). The new contract
     // (backend-owned prompt queue, May 2026): submit-while-streaming
     // POSTs like any other prompt; the backend replies 202
-    // {status:"queued", session_id, queuePosition, promptId} instead of
+    // {queued:true, queue_position, prompt_id, active_turn_id} instead of
     // minting a turn. This record mirrors the backend's per-session queue
     // so the inline queued user bubbles (MessageBubble's
     // message-bubble--queued chrome) can surface the pending prompts with a
@@ -997,6 +1119,15 @@ export const useChatStore = defineStore('chat', {
     //
     // Transient — never persisted, never hydrated from the backend.
     bootstrapPromise: null as Promise<void> | null,
+    // bootstrapComplete — flips to true in bootstrap()'s .finally() so
+    // route-sync watchers (ChatView's store→route push) can suppress
+    // navigation while initial hydration is still in flight. Without
+    // this gate, restoreStateFromBackend can transiently reset
+    // currentSessionId mid-bootstrap and the watcher would push the
+    // stale id into the URL, clobbering a route-param session load
+    // (/chat/s/:id direct nav / reload).
+    // Transient — never persisted, never hydrated from the backend.
+    bootstrapComplete: false,
     // UI Parity PR6 — Collapse all / Expand all override (May 2026).
     //
     // Per-card open state lives in ToolBubble's local isOpen ref. The
@@ -1466,7 +1597,12 @@ export const useChatStore = defineStore('chat', {
       if (this.bootstrapPromise) {
         return this.bootstrapPromise
       }
-      this.bootstrapPromise = this.restoreStateFromBackend()
+      this.bootstrapPromise = this.restoreStateFromBackend().finally(() => {
+        // Settle the gate regardless of outcome — a failed bootstrap must
+        // not leave route-sync watchers suppressed forever (the user can
+        // still navigate; the error toast path in ChatView handles UX).
+        this.bootstrapComplete = true
+      })
       return this.bootstrapPromise
     },
 
@@ -1548,8 +1684,10 @@ export const useChatStore = defineStore('chat', {
         }
         persistSessionId(sessionForAgent.id)
         const loadedForAgent = await fetchSessionMessages(sessionForAgent.id)
-        this.messages = loadedForAgent.map((m) =>
-          m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+        this.messages = reconcileDelegationRows(
+          loadedForAgent.map((m) =>
+            m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+          ),
         )
         const todoStore = useTodoStore()
         todoStore.setCurrentSession(sessionForAgent.id)
@@ -1587,8 +1725,10 @@ export const useChatStore = defineStore('chat', {
       }
       persistSessionId(session.id)
       const loadedForSession = await fetchSessionMessages(session.id)
-      this.messages = loadedForSession.map((m) =>
-        m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+      this.messages = reconcileDelegationRows(
+        loadedForSession.map((m) =>
+          m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+        ),
       )
       const todoStore = useTodoStore()
       todoStore.setCurrentSession(session.id)
@@ -1880,6 +2020,69 @@ export const useChatStore = defineStore('chat', {
       // cross-tab guarantee: tab B's diff observes the same status
       // flip and unmounts its prompt within long-poll cadence. The
       // Granting… flag flips off when the diff applies.
+    },
+
+    /**
+     * Question Tool (Aug 2026) — the operator's submission of an
+     * inline QuestionPrompt answer. Mirrors grantPermission: marks the
+     * request in-flight ("Submitting…" state), POSTs the answers to
+     * /question-answer, and clears the optimistic flag on failure
+     * (re-throw so the prompt can surface a retry affordance).
+     * Removal from pendingQuestions happens in the long-poll diff
+     * when the answered status flips — the cross-tab guarantee.
+     */
+    async answerQuestion(requestId: string, answers: string[]): Promise<void> {
+      const sessionId = this.currentSessionId
+      if (!sessionId) {
+        return
+      }
+      this.answeringQuestionRequests.add(requestId)
+      try {
+        await apiAnswerQuestion(sessionId, requestId, answers)
+      } catch (error) {
+        this.answeringQuestionRequests.delete(requestId)
+        throw error
+      }
+      // Optimistic resolution (Sept 2026 chat-dedup regression fix):
+      // the Sept 2026 dedup gate suppressed the inline QuestionTool
+      // card while a question is pending (overlay-only), which removed
+      // the old "always-rendered card flips to Answered" behaviour.
+      // Without this local resolution nothing replaces the overlay
+      // until the long-poll diff delivers the answered entry — the
+      // "nothing appears in chat right away" symptom. Latch the
+      // pending entry's question text (the wire copy, not the args
+      // fallback) plus the operator's answers into
+      // answeredQuestions so MessageBubble's suppression gate opens
+      // immediately and the answered card renders.
+      //
+      // Second regression (Sept 2026 follow-up): when the backend
+      // omits question_requests entirely (MessageBubble's
+      // bubble-anchored fallback synthesised the request as
+      // `msg-<messageId>`), pendingQuestions has NO entry here, so the
+      // latch never fired — the fallback re-synthesised a pending
+      // request after the answer POST and the answered card stayed
+      // suppressed forever. Always latch: use the pending entry when
+      // present, otherwise a minimal entry carrying the answers (the
+      // question text comes from MessageBubble's latched/args
+      // heading, not from here).
+      const answered = this.pendingQuestions[requestId]
+      const prior = this.answeredQuestions[requestId] ?? {}
+      this.answeredQuestions[requestId] = {
+        ...(answered ?? {
+          request_id: requestId,
+          tool_name: prior.tool_name ?? '',
+          question: prior.question ?? '',
+          options: prior.options ?? [],
+          allow_multiple: prior.allow_multiple ?? false,
+        }),
+        ...prior,
+        status: 'answered',
+        answers: [...answers],
+      }
+      if (answered) {
+        delete this.pendingQuestions[requestId]
+      }
+      this.answeringQuestionRequests.delete(requestId)
     },
 
     /**
@@ -2329,8 +2532,14 @@ export const useChatStore = defineStore('chat', {
         // Backend history has no notion of a 'running' state; leaving
         // status === undefined allows handleContentChunk to wrongly adopt
         // a prior turn's assistant as the chunk target on the next send.
-        this.messages = loaded.map((m) =>
-          m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+        // reconcileDelegationRows then re-establishes the delegation
+        // single-surface invariant (chain identity on `task` rows,
+        // started rows retired for completed chains) so a cold reload
+        // renders one delegation card per chain.
+        this.messages = reconcileDelegationRows(
+          loaded.map((m) =>
+            m.role === 'assistant' && !m.status ? { ...m, status: 'completed' } : m,
+          ),
         )
 
         // Sync the todoStore: switch its active session and rebuild the
@@ -2494,7 +2703,11 @@ export const useChatStore = defineStore('chat', {
           )
         : []
 
-      this.messages = [...sealedBackend, ...optimisticOrphans, ...inFlightLocalOrphans]
+      this.messages = reconcileDelegationRows([
+        ...sealedBackend,
+        ...optimisticOrphans,
+        ...inFlightLocalOrphans,
+      ])
 
       // Recompute per-tool elapsed times from the freshly loaded backend
       // timestamps. The backend persists timestamps but NOT the
@@ -2954,6 +3167,17 @@ export const useChatStore = defineStore('chat', {
           } else {
             this.messages.push(row)
           }
+          const stored = idx >= 0 ? this.messages[idx] : row
+          if (
+            (stored.role === 'delegation_started' || stored.role === 'delegation') &&
+            typeof stored.chainId === 'string' &&
+            stored.chainId !== ''
+          ) {
+            linkDelegationChain(this.messages, stored.chainId, stored.description)
+            if (stored.role === 'delegation') {
+              retireStartedDelegationRows(this.messages, stored)
+            }
+          }
         }
 
         // Phase-4-Commit-2 — write the heartbeat-projected phase +
@@ -3254,6 +3478,59 @@ export const useChatStore = defineStore('chat', {
               delete this.pendingPermissionRequests[knownId]
               if (this.grantingPermissionRequests.has(knownId)) {
                 this.grantingPermissionRequests.delete(knownId)
+              }
+            }
+          }
+        }
+
+        // Question Tool (Aug 2026) — diff question_requests against the
+        // prior poll's pending entries, mirroring the permission_requests
+        // diff above. pending → insert into pendingQuestions (the
+        // QuestionPrompt component renders inline); answered/timeout →
+        // remove + clear the Submitting… flag; entries absent from the
+        // server's slice are removed as a forward-compat hedge.
+        const incomingQuestions = state.question_requests
+        if (Array.isArray(incomingQuestions)) {
+          const seenQuestionIds = new Set<string>()
+          for (const entry of incomingQuestions) {
+            if (!entry?.request_id) continue
+            seenQuestionIds.add(entry.request_id)
+            // Status-casing tolerance: normalise the wire value before
+            // the pending/resolved branch so a server emitting
+            // "Pending"/"Answered" (or any casing) still routes
+            // correctly instead of being misread as resolved.
+            const rawStatus =
+              typeof entry.status === 'string' ? entry.status.toLowerCase() : ''
+            if (rawStatus === 'pending') {
+              this.pendingQuestions[entry.request_id] = entry
+            } else {
+              // Sept 2026 regression fix: answerQuestion may already
+              // have latched an optimistic answered entry locally.
+              // Merge — the canonical server entry (with any server
+              // side answers) wins, but never duplicate or resurrect
+              // the pending entry.
+              this.answeredQuestions[entry.request_id] = {
+                ...(this.answeredQuestions[entry.request_id] ?? {}),
+                ...entry,
+              }
+              if (this.pendingQuestions[entry.request_id]) {
+                delete this.pendingQuestions[entry.request_id]
+              }
+              if (this.answeringQuestionRequests.has(entry.request_id)) {
+                this.answeringQuestionRequests.delete(entry.request_id)
+              }
+            }
+          }
+          for (const knownId of Object.keys(this.pendingQuestions)) {
+            if (!seenQuestionIds.has(knownId)) {
+              // NOTE (Sept 2026): absent-from-slice does NOT mean
+              // answered — a GC'd pending entry just unmounts the
+              // overlay; answeredQuestions is only populated by a
+              // local answer POST or an explicit answered/timeout wire
+              // status above.
+              delete this.pendingQuestions[knownId]
+              if (this.answeringQuestionRequests.has(knownId)) {
+                this.answeringQuestionRequests.delete(knownId)
               }
             }
           }
@@ -3675,6 +3952,11 @@ export const useChatStore = defineStore('chat', {
         // block must skip its flag-clear — flagged via `wasQueued`.
         if (sentResult.queued) {
           wasQueued = true
+          // Seed the watcher with the in-flight turn id so it knows which
+          // turn to skip when polling for the queued prompt's NEW turn.
+          if (sentResult.activeTurnId) {
+            this.lastPollTurnIdBySession[capturedSessionId] = sentResult.activeTurnId
+          }
           this.markPromptQueued(capturedSessionId, optimisticMessage.id, text, sentResult)
           void this.watchQueuedPrompts(capturedSessionId)
           return
@@ -3870,17 +4152,30 @@ export const useChatStore = defineStore('chat', {
         }
         this.escapePressCount = 0
 
-        // Phase-4-Commit-2 of "Turn-Based Post-Then-Poll Architecture
-        // (May 2026)" retired the DELETE /api/v1/sessions/{id}/stream
-        // cancel endpoint along with the SSE handler that owned it.
-        // A server-side DELETE /api/v1/sessions/{id}/turns/{turn_id}
-        // cancel endpoint is a follow-on (tracked separately). For
-        // now Escape-Escape clears the per-session UI gate immediately
-        // so the composer flips back to Send; the long-poll itself
-        // continues until the engine drains, and any chunks that
-        // arrive land on a now-cleared streaming slot (no user-visible
-        // re-render). The Turn registry's terminal state still resolves
-        // correctly when the engine completes.
+        // Server-side cancel (Session Cancel, Aug 2026): DELETE
+        // /api/v1/sessions/{id}/turns/{turn_id} so the engine actually
+        // stops — the backend registry marks the turn terminal
+        // 'cancelled' and aborts the run instead of draining to
+        // natural completion. The long-poll loop exits on ANY terminal
+        // snapshot (status !== 'running'), so it stops riding the turn
+        // and the post-poll reconcile renders whatever the backend
+        // persisted — a fully-stopped session instead of a cosmetic
+        // UI clear while tokens keep burning.
+        //
+        // Fire-and-forget: the UI gate clears unconditionally so the
+        // composer flips back to Send even if the DELETE fails or the
+        // turn id isn't known yet (pre-turn loading window — the
+        // POST hasn't resolved a turn id, nothing to cancel
+        // server-side).
+        const turnId = this.lastPollTurnIdBySession[sessionId]
+        if (turnId) {
+          apiCancelTurn(sessionId, turnId).catch((err) => {
+            // A failed cancel leaves the turn to complete naturally;
+            // the poll loop still resolves it terminal and the
+            // reconcile renders the final state. Log for diagnosis.
+            console.warn('Failed to cancel turn server-side', err)
+          })
+        }
         this.setSessionStreaming(sessionId, { isLoading: false, isStreaming: false })
       }
     },
@@ -3935,6 +4230,25 @@ export const useChatStore = defineStore('chat', {
     },
 
     applyDelegationEvent(event: SSEDelegationEvent): void {
+      // Delegation single-surface (Sept 2026 UI audit, issue 1) —
+      // establish the chain identity on the `task` tool rows first, then
+      // retire the in-flight card row when the event reports the chain
+      // completed: the completed surface is the terminal `delegation`
+      // row the poll merge lands, so a `delegation_started` row must
+      // never survive its chain's completion. Terminal events stop here
+      // — their metadata belongs to the terminal row, and falling
+      // through would either re-create a started row or stamp
+      // delegation fields onto an unrelated running assistant.
+      if (event.chainId !== undefined) {
+        linkDelegationChain(this.messages, event.chainId, event.description)
+        if (event.status === 'completed') {
+          const chainId = event.chainId
+          this.messages = this.messages.filter(
+            (m) => !(m.role === 'delegation_started' && m.chainId === chainId),
+          )
+          return
+        }
+      }
       // Prefer matching by chain_id or target_agent — those identify a
       // specific in-flight delegation. Fall back to the in-flight
       // streaming assistant (status === 'running'), NOT any non-completed
@@ -4068,6 +4382,11 @@ export const useChatStore = defineStore('chat', {
           return
         case 'delegation':
           this.applyDelegationEvent(event)
+          return
+        case 'swarm':
+          // Swarm lifecycle (Aug 2026) — consumed by the swarmStore's
+          // run-tree via the shared swarm event stream; no chat-side
+          // handling yet.
           return
         case 'error':
           this.error = event.error

@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createRouter, createMemoryHistory } from "vue-router";
-import { defineComponent, h } from "vue";
+import { defineComponent, h, nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import MessageBubble from "./MessageBubble.vue";
 import type { Message } from "@/types";
 import { registerTool } from "@/tools/toolRegistry";
 import { useChatStore } from "@/stores/chatStore";
-import { ensureHighlighterLoaded } from "@/lib/markdownHighlighter";
+import {
+  ensureHighlighterLoaded,
+  ensureLangLoaded,
+} from "@/lib/markdownHighlighter";
 import { _resetNowSharedState } from "@/composables/useNow";
 
 // Mock chat store
@@ -117,6 +120,15 @@ describe("MessageBubble", () => {
       pendingPermissionRequests: {},
       grantingPermissionRequests: new Set<string>(),
       grantPermission: vi.fn(),
+      // Question Tool (Aug 2026) — pendingQuestions gates the inline
+      // QuestionPrompt; default empty. Specs seed it explicitly.
+      pendingQuestions: {},
+      // Sept 2026 regression fix — answeredQuestions carries resolved
+      // entries (optimistically latched by answerQuestion / merged by
+      // the poll diff) so MessageBubble's answeredQuestionForBubble
+      // can match them and open the suppression gate.
+      answeredQuestions: {},
+      answeringQuestionRequests: new Set<string>(),
       // Backend-owned prompt queue (May 2026) — the inline queued-bubble
       // cancel control calls cancelQueuedPrompt(sessionId, promptId).
       cancelQueuedPrompt: vi.fn(),
@@ -213,6 +225,12 @@ describe("MessageBubble", () => {
           content: "```typescript\nconst answer: number = 42;\n```",
         }),
       );
+      await ensureLangLoaded("typescript");
+      // Cover the core→grammar→ready-pulse→re-render chain: the
+      // grammar loads on demand after mount, so give the ready pulse
+      // enough microtask/tick rounds to re-tokenise.
+      await flushPromises();
+      await nextTick();
       await flushPromises();
 
       const html = wrapper.html();
@@ -649,6 +667,123 @@ describe("MessageBubble", () => {
       expect(card.text()).toContain("4");
       expect(card.text()).toContain("read");
       expect(card.text()).toContain("2m 30s");
+    });
+  });
+
+  /**
+   * Delegation single-surface (Sept 2026 UI audit, issue 1): the
+   * delegation card is the ONLY chat surface for a delegation chain.
+   * A `task` tool row carrying a chainId (identity stamped by the
+   * chatStore at ingestion / load time) renders nothing — the
+   * delegation_started card owns the in-flight state and the terminal
+   * `delegation` card owns the completed state. A `task` row without a
+   * chain link keeps its generic tool card. The rule is row-local:
+   * no sibling-message inspection, no "suppress because another card
+   * exists" logic.
+   */
+  describe("delegation single-surface (one card per delegation)", () => {
+    it("renders no tool card and no bubble for a delegation-linked task tool_call", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          id: "tc-1",
+          role: "tool_call",
+          toolName: "task",
+          toolInput: '{"agent":"executor","description":"Implement the user model"}',
+          content: "",
+          chainId: "chain-1",
+        }),
+      );
+
+      expect(wrapper.find('[data-component="tool-renderer"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="delegation-started-card"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="delegation-completed-card"]').exists()).toBe(false);
+      expect(wrapper.text()).toBe("");
+    });
+
+    it("renders no tool card for the delegation-linked merged task result row", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          id: "tr-1",
+          role: "tool_result",
+          toolName: "task",
+          content: "child finished",
+          chainId: "chain-1",
+        }),
+      );
+
+      expect(wrapper.find('[data-component="tool-renderer"]').exists()).toBe(false);
+      expect(wrapper.text()).toBe("");
+    });
+
+    it("still renders the generic tool card for a task tool row with no delegation link", () => {
+      const wrapper = mountWithStubs(
+        makeMessage({
+          id: "tc-2",
+          role: "tool_call",
+          toolName: "task",
+          toolInput: '{"agent":"executor"}',
+          content: "",
+        }),
+      );
+
+      const tool = wrapper.find('[data-component="tool-renderer"]');
+      expect(tool.exists()).toBe(true);
+      expect(tool.attributes("data-tool")).toBe("generic");
+    });
+
+    it("renders the in-flight card (spinner + Live) for a running delegation_started row", () => {
+      const wrapper = mountWithRouter(
+        makeMessage({
+          id: "ds-1",
+          role: "delegation_started",
+          content: "",
+          chainId: "chain-1",
+          targetAgent: "executor",
+          status: "running",
+        }),
+      );
+
+      expect(wrapper.find('[data-testid="delegation-started-card"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="delegation-spinner"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="delegation-live-badge"]').exists()).toBe(true);
+    });
+
+    it("renders nothing for a completed delegation_started row (status gate retires the in-flight card)", () => {
+      const wrapper = mountWithRouter(
+        makeMessage({
+          id: "ds-2",
+          role: "delegation_started",
+          content: "",
+          chainId: "chain-1",
+          targetAgent: "executor",
+          status: "completed",
+        }),
+      );
+
+      expect(wrapper.find('[data-testid="delegation-started-card"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="delegation-spinner"]').exists()).toBe(false);
+      expect(wrapper.text()).toBe("");
+    });
+
+    it("renders only the completed card for a terminal delegation row, with the store-stamped duration", () => {
+      const wrapper = mountWithRouter(
+        makeMessage({
+          id: "d-1",
+          role: "delegation",
+          content: "Implemented the user model",
+          chainId: "chain-1",
+          targetAgent: "executor",
+          status: "completed",
+          durationMs: 15000,
+          timestamp: "2026-06-01T00:00:15Z",
+        }),
+      );
+
+      const completed = wrapper.find('[data-testid="delegation-completed-card"]');
+      expect(completed.exists()).toBe(true);
+      expect(completed.text()).toContain("15s");
+      expect(wrapper.find('[data-testid="delegation-started-card"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="delegation-spinner"]').exists()).toBe(false);
     });
   });
 
@@ -2341,6 +2476,142 @@ describe("MessageBubble", () => {
       await flushPromises();
 
       expect(wrapper.find('[data-testid="permission-prompt"]').exists()).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("question tool bubble-anchored fallback (Aug 2026)", () => {
+    const QuestionTool = {
+      template: '<div data-component="tool-renderer" data-tool="question" />',
+      props: ["toolName", "heading", "body", "status", "toolInput"],
+    };
+    const QuestionPromptStub = {
+      template:
+        '<div data-testid="question-prompt" :data-request-id="request.request_id">{{ request.question }} {{ request.options?.join("|") }}</div>',
+      props: { request: { type: Object, required: true } },
+    };
+
+    function makeQuestionCall(overrides: Partial<Message> = {}): Message {
+      return makeMessage({
+        id: "qc-1",
+        role: "tool_call",
+        toolName: "question",
+        toolInput: JSON.stringify({
+          question: "Which database?",
+          options: ["postgres", "sqlite"],
+        }),
+        status: "completed",
+        content: "",
+        ...overrides,
+      });
+    }
+
+    function mountQuestion(message: Message) {
+      registerTool({ name: "question", component: QuestionTool });
+      return mount(MessageBubble, {
+        props: { message },
+        global: {
+          stubs: {
+            QuestionPrompt: QuestionPromptStub,
+            ToolErrorCard,
+          },
+        },
+      });
+    }
+
+    it("surfaces an inline selector when backend omits question_requests", () => {
+      // pendingQuestions empty (backend question_requests slice absent
+      // from the long-poll) — the fallback must still surface options.
+      const wrapper = mountQuestion(makeQuestionCall());
+      const prompt = wrapper.find('[data-testid="question-prompt"]');
+      expect(prompt.exists()).toBe(true);
+      expect(prompt.attributes("data-request-id")).toBe("msg-qc-1");
+      expect(prompt.text()).toContain("Which database?");
+      expect(prompt.text()).toContain("postgres|sqlite");
+    });
+
+    it("does not render the fallback once a store entry exists", () => {
+      mockChatStore.pendingQuestions = {
+        "req-1": {
+          request_id: "req-1",
+          tool_name: "question",
+          question: "Store question?",
+          options: ["a"],
+          status: "pending",
+        },
+      };
+      const wrapper = mountQuestion(makeQuestionCall());
+      // Question chat-dedup (Sept 2026 follow-up): while the store entry
+      // is pending, the bubble must NOT render the inline QuestionPrompt
+      // (the composer QuestionSelector owns the interaction) NOR the
+      // QuestionTool card — the question appears once, in the overlay.
+      const prompt = wrapper.find('[data-testid="question-prompt"]');
+      expect(prompt.exists()).toBe(false);
+      expect(wrapper.find('[data-testid="tool-renderer"]').exists()).toBe(
+        false,
+      );
+    });
+
+    // Primary path (Sept 2026 live regression): backend DOES include
+    // question_requests, so pendingQuestions carries the real
+    // request_id while pending; after the operator answers via the
+    // overlay, answerQuestion latches answeredQuestions[request_id]
+    // and the poll diff merges the canonical answered entry under the
+    // SAME key. The suppression gate must open and the answered
+    // QuestionTool card must render immediately (no pending entry, no
+    // fallback, no answered entry = the "answered card never appears"
+    // live symptom).
+    it("renders the answered card once the store entry is answered (primary path, stable request_id)", async () => {
+      mockChatStore.pendingQuestions = {
+        "req-1": {
+          request_id: "req-1",
+          tool_name: "question",
+          question: "Store question?",
+          options: ["a", "b"],
+          status: "pending",
+        },
+      };
+      const wrapper = mountQuestion(makeQuestionCall());
+      expect(wrapper.find('[data-testid="tool-renderer"]').exists()).toBe(
+        false,
+      );
+
+      // Operator answers via the overlay — answerQuestion latches the
+      // answered entry under the SAME request_id and deletes the
+      // pending one; the poll diff later merges the canonical entry.
+      // The mock store is a plain (non-reactive) object, so re-mount
+      // to observe the post-answer state — mirroring the live flow
+      // where answerQuestion latches answeredQuestions[request_id]
+      // under the SAME real request_id and deletes the pending entry,
+      // and the poll diff later merges the canonical answered entry.
+      mockChatStore.pendingQuestions = {};
+      mockChatStore.answeredQuestions = {
+        "req-1": {
+          request_id: "req-1",
+          tool_name: "question",
+          question: "Store question?",
+          options: ["a", "b"],
+          status: "answered",
+          answers: ["a"],
+        },
+      };
+      const answeredWrapper = mountQuestion(makeQuestionCall());
+      expect(
+        answeredWrapper.find('[data-testid="question-prompt"]').exists(),
+      ).toBe(false);
+      const renderer = answeredWrapper.find('[data-testid="tool-renderer"]');
+      expect(renderer.exists()).toBe(true);
+    });
+    it("does not render the fallback for non-question tools", () => {
+      registerTool({ name: "bash", component: BashTool });
+      const wrapper = mountQuestion(
+        makeQuestionCall({
+          toolName: "bash",
+          toolInput: JSON.stringify({ command: "ls", options: ["a"] }),
+        }),
+      );
+      expect(wrapper.find('[data-testid="question-prompt"]').exists()).toBe(
         false,
       );
     });

@@ -1,9 +1,10 @@
 /* FlowState themes — applied via data-theme on <html>.
  *
  * N2 + N3 (Vue UI Parity vs OpenCode, May 2026 UI Parity PR4): each
- * theme block ships FULL var coverage (bg / text / border / accent /
- * muted / severity) so no fallback gaps surface in any FlowState UI
- * surface. The set is the baseline trio (dark / light / terminal) plus
+ * theme block ships FULL var coverage (bg / surface / text / border /
+ * accent / muted / severity) so no fallback gaps surface in any
+ * FlowState UI surface. The set is the baseline trio (dark / light /
+ * terminal) plus
  * four community-flavoured palettes (tokyo-night, catppuccin-mocha,
  * dracula, nord).
  *
@@ -19,6 +20,7 @@
   --bg-primary: #1a1b26;
   --bg-secondary: #16161e;
   --bg-elevated: #24283b;
+  --surface-low: #1a1b26;
   --border: #2a2d3e;
   --text-primary: #c0caf5;
   --text-secondary: #7aa2f7;
@@ -44,6 +46,7 @@
   --bg-primary: #f8f8f8;
   --bg-secondary: #efefef;
   --bg-elevated: #ffffff;
+  --surface-low: #f8f8f8;
   --border: #d0d0d0;
   --text-primary: #2c2c2c;
   --text-secondary: #3d6fd4;
@@ -66,6 +69,7 @@
   --bg-primary: #0d0d0d;
   --bg-secondary: #0a0a0a;
   --bg-elevated: #111111;
+  --surface-low: #0d0d0d;
   --border: #2a2a2a;
   --text-primary: #ffb000;
   --text-secondary: #ffc840;
@@ -95,6 +99,7 @@
   --bg-primary: #1a1b26;
   --bg-secondary: #16161e;
   --bg-elevated: #24283b;
+  --surface-low: #1a1b26;
   --border: #2a2d3e;
   --text-primary: #a9b1d6;
   --text-secondary: #7aa2f7;
@@ -120,6 +125,7 @@
   --bg-primary: #1e1e2e;
   --bg-secondary: #181825;
   --bg-elevated: #313244;
+  --surface-low: #1e1e2e;
   --border: #45475a;
   --text-primary: #cdd6f4;
   --text-secondary: #89b4fa;
@@ -145,6 +151,7 @@
   --bg-primary: #282a36;
   --bg-secondary: #21222c;
   --bg-elevated: #44475a;
+  --surface-low: #282a36;
   --border: #44475a;
   --text-primary: #f8f8f2;
   --text-secondary: #8be9fd;
@@ -170,6 +177,7 @@
   --bg-primary: #2e3440;
   --bg-secondary: #242933;
   --bg-elevated: #3b4252;
+  --surface-low: #2e3440;
   --border: #434c5e;
   --text-primary: #eceff4;
   --text-secondary: #88c0d0;

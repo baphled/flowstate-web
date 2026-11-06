@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Message } from "@/types";
+import type { TurnStateQuestionRequest } from "@/api";
 import { useChatStore } from "@/stores/chatStore";
 import { useNow } from "@/composables/useNow";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
 import ThinkingPanel from "./ThinkingPanel.vue";
 import PermissionPrompt from "./PermissionPrompt.vue";
+import QuestionPrompt from "./QuestionPrompt.vue";
 import CopyButton from "@/components/tools/CopyButton.vue";
 import ToolErrorCard from "@/components/tools/ToolErrorCard.vue";
 import GenericTool from "@/components/tools/GenericTool.vue";
-import { getToolComponent } from "@/tools/toolRegistry";
+import { getToolComponent, toolNameBasename, toolNamesMatch } from "@/tools/toolRegistry";
 import { buildToolRenderSpec } from "@/views/toolRenderSpec";
 import { sanitiseMessageContent } from "@/lib/messageContentBackstop";
 
@@ -97,11 +99,44 @@ const isDelegationStarted = computed(
 );
 const isDelegation = computed(() => props.message.role === "delegation");
 
+// Delegation single-surface (Sept 2026 UI audit, issue 1). A `task`
+// tool invocation that carries a chainId belongs to a delegation chain,
+// and the delegation card (delegation_started in-flight / `delegation`
+// terminal) is the ONLY surface for that lineage — the generic task
+// tool card must never render for it. The chatStore establishes the
+// identity at ingestion time (poll merge, delegation events, cold-load
+// reconcile); this predicate is purely row-local and deliberately does
+// NOT inspect sibling messages (no "suppress because another card
+// exists" logic — that pattern is banned).
+const isDelegationLinkedTaskCall = computed(
+  () =>
+    isToolInvocation.value &&
+    props.message.toolName === "task" &&
+    typeof props.message.chainId === "string" &&
+    props.message.chainId !== "",
+);
+
+// In-flight gate for the started card: a delegation_started row whose
+// status was sealed to 'completed' (handleStreamDone, or the SSE
+// delegation event for the chain's completion) must not render the
+// spinner + Live + ticking-timer card. The completed surface is the
+// terminal `delegation` row's card.
+const isDelegationStartedInFlight = computed(
+  () => isDelegationStarted.value && props.message.status !== "completed",
+);
+
 // Elapsed time for a completed delegation message, computed by finding
 // the paired delegation_started message (matched via chainId) and using
 // the delta between their timestamps. Returns undefined when there is no
 // matching started message (edge case: orphaned delegation on reload).
+// The store stamps durationMs on the terminal row when it retires the
+// started row (single-surface fix) and on cold-load reconcile, so the
+// duration chip survives without the started row; the timestamp scan is
+// the fallback while the started row is still in the list.
 const elapsedForDelegation = computed(() => {
+  if (typeof props.message.durationMs === "number") {
+    return Math.max(0, Math.floor(props.message.durationMs / 1000));
+  }
   const chainId = props.message.chainId;
   if (!chainId) return undefined;
   const started = chatStore.messages.find(
@@ -323,9 +358,9 @@ const isPlain = computed(
 // one render branch matching.
 const hasRenderableContent = computed(
   () =>
-    isToolInvocation.value ||
+    (isToolInvocation.value && !isDelegationLinkedTaskCall.value) ||
     isToolError.value ||
-    isDelegationStarted.value ||
+    isDelegationStartedInFlight.value ||
     isDelegation.value ||
     isThinking.value ||
     isThinkingOnlyDegraded.value ||
@@ -591,6 +626,161 @@ const pendingPermissionForBubble = computed(() => {
   return null;
 });
 
+/**
+ * Bubble-anchored fallback (Question Tool hardening, Aug 2026).
+ *
+ * Live backend probe confirmed the turn payload (GET
+ * /api/v1/sessions/{id}/turns/{turnId}) carries no question_requests
+ * state slice — the field appears only in the long-poll response, and
+ * can be omitted entirely by servers without the question registry.
+ * When that happens chatStore.pendingQuestions stays empty and the
+ * pendingQuestionForBubble anchor above never fires, leaving the user
+ * with no way to answer (the "Answered ✓" tool bubble symptom).
+ *
+ * This fallback synthesises a TurnStateQuestionRequest directly from
+ * the suspended tool_call message's own args (toolInput JSON →
+ * question / options / allow_multiple) whenever the bubble is a
+ * `question` tool_call carrying options but no tool_result yet. The
+ * request_id is derived from the message id so answerQuestion still
+ * POSTs a stable id; the backend tolerates unknown ids (the turn
+ * resumes on answer). Prefer wiring the store? Not clean here —
+ * populating pendingQuestions from a component would fight the
+ * poll-diff (which deletes entries absent from the server slice),
+ * so the inline-render fallback is the correct hardening point.
+ */
+const fallbackQuestionForBubble = computed<TurnStateQuestionRequest | null>(() => {
+  if (isToolInvocation.value === false) return null;
+  if (props.message.role !== "tool_call") return null;
+  if (pendingQuestionForBubble.value) return null;
+  // Sept 2026 regression fix — a resolved entry (optimistic local
+  // answer or canonical poll diff) means the interaction is closed;
+  // the answered QuestionTool card renders. Re-synthesising a pending
+  // request here would re-suppress that card (the "nothing appears in
+  // chat after answering" symptom).
+  if (answeredQuestionForBubble.value) return null;
+  const targetTool = props.message.toolName;
+  if (!targetTool || toolNameBasename(targetTool) !== "question") return null;
+  // Only when the call is still awaiting its result.
+  if (props.message.status === "error") return null;
+  const raw = props.message.toolInput;
+  if (!raw) return null;
+  let args: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    args = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const options = Array.isArray(args.options)
+    ? args.options.filter((o): o is string => typeof o === "string")
+    : [];
+  // Free-text questions (no options) must still render; only bail
+  // when there is neither a usable question nor any options.
+  const question =
+    typeof args.question === "string" && args.question.trim() !== ""
+      ? args.question
+      : "";
+  if (question === "" && options.length === 0) return null;
+  return {
+    request_id: `msg-${props.message.id}`,
+    tool_name: targetTool,
+    question,
+    options,
+    allow_multiple: args.allow_multiple === true,
+    status: "pending",
+  };
+});
+
+// Question Tool (Sept 2026 regression fix) — resolved questions
+// (answered/timeout) latched in chatStore.answeredQuestions, either
+// optimistically right after the operator submits or canonically by
+// the long-poll diff. Matching by tool name so namespaced emissions
+// still anchor. Used to (a) keep the chat-dedup suppression gate OPEN
+// (so the answered QuestionTool card renders immediately on answer)
+// and (b) stop the args-based fallback synthesis from re-firing and
+// re-suppressing the answered card.
+const answeredQuestionForBubble = computed(() => {
+  if (!isToolInvocation.value) return null;
+  const targetTool = props.message.toolName;
+  if (!targetTool) return null;
+  const resolved = chatStore.answeredQuestions;
+  if (!resolved) return null;
+  for (const entry of Object.values(resolved)) {
+    // Sept 2026 follow-up regression fix: when the backend omits
+    // question_requests, the answer POST latches a minimal entry whose
+    // tool_name is empty — match it by the fallback's derived
+    // request_id (`msg-<messageId>`) so the suppression gate still
+    // opens and the answered card renders.
+    if (entry?.request_id === `msg-${props.message.id}`) {
+      return entry;
+    }
+    if (
+      entry?.tool_name &&
+      toolNamesMatch(entry.tool_name, targetTool)
+    ) {
+      return entry;
+    }
+  }
+  return null;
+});
+
+const activeQuestionForBubble = computed(
+  () =>
+    pendingQuestionForBubble.value ??
+    fallbackQuestionForBubble.value,
+);
+
+/**
+ * Question chat-dedup (Sept 2026) — while a question is pending it
+ * must surface ONLY in the overlay surfaces (inline QuestionPrompt /
+ * composer QuestionSelector), never as a chat bubble. Without this
+ * gate the QuestionTool card renders in the stream simultaneously
+ * with the overlay — the "question renders twice" symptom. Once the
+ * question resolves (entry leaves pendingQuestions and the fallback
+ * no longer synthesises one), the bubble re-appears as the answered
+ * card (QuestionTool with latched question text + Answered label).
+ */
+const suppressQuestionBubble = computed<boolean>(
+  () =>
+    isToolInvocation.value === true &&
+    typeof props.message.toolName === "string" &&
+    toolNameBasename(props.message.toolName) === "question" &&
+    activeQuestionForBubble.value !== null,
+);
+// Propagate the resolved entry (latched question text + answers) to
+// the QuestionTool renderer so the answered card shows what the
+// operator picked without waiting for the poll diff.
+const resolvedQuestionEntry = computed(() => answeredQuestionForBubble.value);
+
+// Question Tool (Aug 2026) — the inline QuestionPrompt anchors to the
+// suspended question tool_call bubble, mirroring
+// pendingPermissionForBubble. Match by tool_name via toolNamesMatch
+// (exact OR basename-normalised) so a namespaced emission
+// (`mcp__server__question`) still anchors when the message carries the
+// bare `question` name — or vice versa; first-match wins on same-tool
+// concurrency, v1 acceptable.
+const pendingQuestionForBubble = computed(() => {
+  if (!isToolInvocation.value) return null;
+  const targetTool = props.message.toolName;
+  if (!targetTool) return null;
+  // Defensive: stub chatStore without the Question Tool fields.
+  const pending = chatStore.pendingQuestions;
+  if (!pending) return null;
+  for (const entry of Object.values(pending)) {
+    if (
+      entry?.tool_name &&
+      toolNamesMatch(entry.tool_name, targetTool) &&
+      entry.status === "pending"
+    ) {
+      return entry;
+    }
+  }
+  return null;
+});
+
 async function handleRevert(): Promise<void> {
   await chatStore.revertToMessage(props.message.id);
 }
@@ -706,13 +896,23 @@ async function handleRegenerate(): Promise<void> {
           data-testid="tool-card-elapsed"
         >{{ formatElapsed(Math.round(props.message.elapsedMs / 1000)) }}</span>
       </div>
+      <!--
+        Question chat-dedup (Sept 2026): while the question is
+        pending, the QuestionTool card is suppressed so the question
+        appears only in the overlay (QuestionPrompt / composer
+        QuestionSelector). Once answered, activeQuestionForBubble
+        goes null and this card renders as the answered card with
+        the latched question text.
+      -->
       <component
         :is="toolComponent"
+        v-if="!suppressQuestionBubble"
         :tool-name="toolSpec.toolName"
         :heading="toolSpec.heading"
         :body="toolSpec.body"
         :status="toolStatus"
         :tool-input="props.message.toolInput"
+        :resolved-question="resolvedQuestionEntry"
         data-testid="tool-renderer"
       />
       <!--
@@ -728,6 +928,18 @@ async function handleRegenerate(): Promise<void> {
       <PermissionPrompt
         v-if="pendingPermissionForBubble"
         :request="pendingPermissionForBubble"
+      />
+      <!--
+        Question Tool (Aug 2026). Inline QuestionPrompt anchored
+        beneath the suspended question tool_call's render, mirroring
+        the PermissionPrompt above. Answered / timeout transitions
+        remove the entry from chatStore.pendingQuestions via
+        pollTurnUntilTerminal's diff so the prompt unmounts cleanly
+        across both tabs.
+      -->
+      <QuestionPrompt
+        v-if="fallbackQuestionForBubble"
+        :request="fallbackQuestionForBubble"
       />
     </div>
 
@@ -747,7 +959,7 @@ async function handleRegenerate(): Promise<void> {
       (left accent border, elevated background) as tool invocations.
     -->
     <div
-      v-else-if="isDelegationStarted"
+      v-else-if="isDelegationStartedInFlight"
       class="delegation-card delegation-card--inflight"
       data-testid="delegation-started-card"
     >

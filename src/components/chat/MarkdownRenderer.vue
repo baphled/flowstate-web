@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import MarkdownIt from "markdown-it";
 import {
   ensureHighlighterLoaded,
   highlightCode,
-  onHighlighterReady,
+  highlighterVersionRef,
 } from "@/lib/markdownHighlighter";
 import { useChatStore } from "@/stores/chatStore";
 
@@ -156,22 +156,17 @@ md.validateLink = (url: string): boolean => {
   return ALLOWED_SCHEMES.has(scheme);
 };
 
-// B1: Reactive version counter to trigger a re-render after the
-// lazy-loaded Shiki highlighter resolves. Before Shiki is ready,
-// `highlightCode` returns `null` and the fence renderer falls back
-// to plain `<pre><code>`. The first time `ensureHighlighterLoaded`
-// completes (typically <100 ms after first render), this counter
-// increments and Vue re-runs `renderedHtml` so the same content
-// re-renders with tokenised code blocks.
-const highlighterVersion = ref(0);
-let unsubscribeReady: (() => void) | null = null;
-
+// B1: Re-render signal after the lazy-loaded Shiki highlighter
+// resolves. The render computed reads the module-level reactive
+// version counter directly (`void highlighterVersionRef.value`), so
+// ANY completed load — core, grammar, or theme — re-evaluates it
+// regardless of when it lands relative to mount. This replaced an
+// onHighlighterReady listener whose pulse could fire before the
+// component subscribed (a listener-registration race that left the
+// first tokenised paint permanently missed).
 onMounted(() => {
-  unsubscribeReady = onHighlighterReady(() => {
-    highlighterVersion.value += 1;
-  });
-  // Fire-and-forget — load Shiki in the background. The
-  // `highlighterVersion` increment above wakes us up when it lands.
+  // Fire-and-forget — load Shiki in the background. The version
+  // counter bump from the module wakes the render computed.
   void ensureHighlighterLoaded();
 });
 
@@ -336,13 +331,47 @@ const renderedHtml = computed(() => {
   // when Shiki finishes loading and the version bumps, the
   // computed re-evaluates with the real highlight callback wired
   // through MarkdownIt.
-  void highlighterVersion.value;
-  const raw = md.render(props.content);
+  void highlighterVersionRef.value;
+  const raw = md.render(paintContent.value);
   // Allow-list filter — Vue's reactivity tracks chat.currentSessionId
   // through the closure, so a session switch re-evaluates the computed
   // and re-applies the constraint with the new active id.
   return applyImageAllowList(raw, chat.currentSessionId);
 });
+
+// Streaming re-render coalescing. During streaming, `props.content`
+// updates on every chunk and `renderedHtml` (a computed over that
+// prop) would re-run the full markdown-it parse + DOM allow-list
+// pass on each token — O(n²) work over a stream. We instead render
+// from a `paintContent` ref that trails the prop on a ~120 ms
+// trailing timer: bursts of chunks collapse into one re-parse, and
+// every timer tick flushes the *latest* prop value so the final
+// rendered output is byte-identical to the unthrottled path.
+// Non-streaming updates (final content set after stream end, or the
+// Shiki highlighterVersion bump above) still flush immediately.
+const RENDER_COALESCE_MS = 120;
+const paintContent = ref(props.content);
+let renderTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPaint(): void {
+  if (renderTimer !== null) {
+    clearTimeout(renderTimer);
+    renderTimer = null;
+  }
+  paintContent.value = props.content;
+}
+
+watch(
+  () => props.content,
+  () => {
+    if (renderTimer !== null) return;
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      paintContent.value = props.content;
+    }, RENDER_COALESCE_MS);
+  },
+  { flush: "post" },
+);
 
 // Per-block copy affordance handler. The fence renderer emits the
 // copy button as static HTML inside the v-html surface, so the click
@@ -390,12 +419,12 @@ function onCopyClick(event: MouseEvent): void {
 }
 
 onBeforeUnmount(() => {
+  // Streaming coalescing timer cleanup — a pending trailing flush
+  // after unmount would be a leak / late write. flushPaint both
+  // clears the pending timer and applies the latest prop value.
+  flushPaint();
   copiedTimers.forEach((t) => clearTimeout(t));
   copiedTimers.clear();
-  if (unsubscribeReady !== null) {
-    unsubscribeReady();
-    unsubscribeReady = null;
-  }
 });
 </script>
 

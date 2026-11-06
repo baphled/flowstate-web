@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useChatStore } from '@/stores/chatStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useSwarmStore } from '@/stores/swarmStore'
+import { connectNotificationStream } from '@/lib/notifications'
 import {
   resolveAgentName,
   collapseToolPairs,
@@ -18,6 +19,7 @@ import CriticalErrorBanner from '@/components/chat/CriticalErrorBanner.vue'
 import MessageBubble from '@/components/chat/MessageBubble.vue'
 import MessageInput from '@/components/chat/MessageInput.vue'
 import TodoListPanel from '@/components/chat/TodoListPanel.vue'
+import SwarmRunTree from '@/components/swarm/SwarmRunTree.vue'
 import EmptyChatState from '@/components/chat/EmptyChatState.vue'
 import AgentPicker from '@/components/agent-picker/AgentPicker.vue'
 import ModelPicker from '@/components/model-picker/ModelPicker.vue'
@@ -27,12 +29,76 @@ import KeyboardHelpModal from '@/components/common/KeyboardHelpModal.vue'
 import ProviderQuotaSummaryModal from '@/components/ProviderQuotaSummaryModal.vue'
 import { installSessionHierarchyNav } from '@/composables/useSessionHierarchyNav'
 import { showToast } from '@/composables/useToast'
+import { useRoute, useRouter } from 'vue-router'
 
 defineOptions({ name: 'ChatView' })
 
 const chatStore = useChatStore()
 const settingsStore = useSettingsStore()
 const swarmStore = useSwarmStore()
+
+// ── Session-URI binding (dev-swarm-d211dd7715c1) ──────────────────────────
+// The URL is the source of truth for WHICH session is viewed; the store
+// remains the source of truth for session state. Two directions:
+//
+//   route → store: a route param change loads that session via
+//   loadSessionMessages (guarded against the id already being active —
+//   the double-load guard for the switcher race).
+//
+//   store → route: when currentSessionId changes out from under the
+//   view (lazy-create on first send, delegation navigation), the URL is
+//   pushed so the new session is shareable/deep-linkable.
+//
+// A load failure (unknown session id in a shared/deep-linked URL) bounces
+// the user back to bare /chat with a toast rather than leaving them on a
+// dead URL.
+// In unit tests that mount ChatView without a router plugin these
+// composables return undefined — the optional chaining below keeps the
+// binding inert in that environment instead of throwing on mount.
+const route = useRoute() as { params: { id?: string | string[] } } | undefined
+const router = useRouter() as { replace: (to: string) => Promise<unknown> } | undefined
+const routeSessionId = computed(() => {
+  const id = route?.params?.id
+  return typeof id === 'string' ? id : null
+})
+
+watch(
+  routeSessionId,
+  async (sessionId) => {
+    if (!sessionId) return
+    // Double-load guard: the switcher already loaded this session and
+    // merely pushed the route — loading again would reset scroll and
+    // re-fetch the messages list for no reason.
+    if (sessionId === chatStore.currentSessionId) return
+    try {
+      await chatStore.loadSessionMessages(sessionId)
+    } catch {
+      showToast({ message: `Session ${sessionId.slice(0, 8)} not found`, variant: 'error' })
+      await router?.replace('/chat')
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => chatStore.currentSessionId,
+  (sessionId) => {
+    if (!sessionId) return
+    // Bootstrap gate: while initial hydration (restoreStateFromBackend)
+    // is still in flight, currentSessionId can transiently flip as the
+    // restore resolves the persisted session. Pushing those transient
+    // values into the URL would clobber a route-param session load
+    // (/chat/s/:id direct nav / reload). Skip until bootstrap settles.
+    if (!chatStore.bootstrapComplete) return
+    // Only react to store-driven session changes that the URL doesn't
+    // already reflect (the route → store watcher above sets the store,
+    // which would echo here; the equality check prevents an infinite
+    // push loop).
+    if (sessionId === routeSessionId.value) return
+    void router?.replace(`/chat/s/${sessionId}`)
+  },
+)
+
 
 const shellRef = ref<HTMLElement | null>(null)
 const messagePaneRef = ref<HTMLElement | null>(null)
@@ -121,28 +187,6 @@ function precedingUserPromptFor(messageId: string): { id: string; content: strin
 // (here) vs list-rendering (those three components); see plan §R8 for
 // the drift-risk note and the future-work item to consolidate.
 const activeStreamingState = computed(() => chatStore.streamingFor(chatStore.currentSessionId))
-
-// Active delegations for the activity indicator. When the current session
-// has in-flight delegations (delegation_started without matching delegation),
-// these show the agent name and latest tool action instead of the model info.
-// Multiple concurrent agents show as a comma-separated list. Falls back to
-// model info ("on model · provider") during regular streaming.
-const activeDelegations = computed(() => {
-  const messages = chatStore.messages
-  // Collect completed chainIds so we know which delegations are still live.
-  const completedChainIds = new Set<string>()
-  for (const msg of messages) {
-    if (msg.role === "delegation" && msg.chainId) {
-      completedChainIds.add(msg.chainId)
-    }
-  }
-  return messages.filter(
-    (msg) =>
-      msg.role === "delegation_started" &&
-      msg.chainId &&
-      !completedChainIds.has(msg.chainId),
-  )
-})
 
 // UI Parity PR5 — Live token counter (May 2026).
 //
@@ -387,6 +431,7 @@ watch(
 )
 
 let teardownHierarchyNav: (() => void) | null = null
+let notificationsHandle: { disconnect(): void } | null = null
 
 // UI Parity PR2 I2 (May 2026) — keyboard-help modal open state.
 // Triggered by global `?` (when no input is focused) or `Ctrl+/` (works
@@ -549,6 +594,10 @@ onMounted(async () => {
   }
   scrollMessagePaneToBottom('smooth')
   void swarmStore.connect()
+  // Notifications SSE bridge — session-independent operator notifications
+  // (turn_complete / task_failed / cooldown / failover) rendered as toasts.
+  // Lives next to the swarm-events subscription; survives session changes.
+  notificationsHandle = connectNotificationStream()
 
   // Slice G — Escape-twice cancel cascade (Streaming Coherence May 2026).
   // Register global keydown listener for escape-twice keybinding. The
@@ -561,6 +610,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopDragging()
   swarmStore.disconnect()
+  notificationsHandle?.disconnect()
+  notificationsHandle = null
   document.removeEventListener('keydown', handleGlobalKeydown)
   if (teardownHierarchyNav) {
     teardownHierarchyNav()
@@ -757,11 +808,10 @@ onBeforeUnmount(() => {
 
       <!--
         Activity indicator — shown during streaming or loading (delegation).
-        When a delegation is in-flight, the indicator shows the delegated
-        agent's most recent action (agent · tool — content) instead of model
-        info, since the delegation card already carries the model chip and
-        showing it twice is redundant. During regular streaming the model
-        info fallback ("on model · provider") is preserved.
+        The in-flight delegation card in the thread is the single surface
+        for a delegation (agent, latest tool, content); the indicator
+        falls back to model info ("on model · provider") during regular
+        streaming.
       -->
       <div
         v-if="activeStreamingState.isStreaming || activeStreamingState.isLoading"
@@ -773,22 +823,7 @@ onBeforeUnmount(() => {
         <span class="agent-activity-dot" aria-hidden="true" />
         <span class="agent-activity-label">{{ chatStore.agentId }} is working…</span>
         <span
-          v-if="activeDelegations.length > 0"
-          class="agent-activity-delegations"
-          data-testid="agent-activity-delegations"
-        >
-          <span
-            v-for="(del, idx) in activeDelegations"
-            :key="del.chainId || idx"
-            class="agent-activity-delegation"
-            data-testid="agent-activity-delegation"
-          >
-            <template v-if="idx > 0">, </template>
-            → {{ del.targetAgent || "Agent" }}<template v-if="del.lastTool"> · {{ del.lastTool }}</template><template v-if="del.content"> — {{ del.content }}</template>
-          </span>
-        </span>
-        <span
-          v-else-if="chatStore.currentModelId || chatStore.currentProviderId"
+          v-if="chatStore.currentModelId || chatStore.currentProviderId"
           class="agent-activity-model"
           data-testid="agent-activity-model"
         >
@@ -861,6 +896,7 @@ onBeforeUnmount(() => {
     <aside v-if="showSwarmPane" class="chat-sidebar" :style="{ width: `${settingsStore.chatSidebarWidth}px` }" data-testid="swarm-pane">
       <div class="sidebar-panels">
         <TodoListPanel class="sidebar-panel" />
+        <SwarmRunTree class="sidebar-panel" />
       </div>
 
       <button

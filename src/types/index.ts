@@ -194,6 +194,23 @@ export interface SwarmEvent {
   agent_id: string;
   metadata?: Record<string, unknown>;
   schema_version?: number;
+  /**
+   * Swarm hierarchy fields (Aug 2026). All optional — the UI must degrade
+   * gracefully against older backends that never emit them (the run-tree
+   * falls back to parsing chain-prefixed coordination keys).
+   */
+  swarm_id?: string;
+  member_id?: string;
+  parent_chain?: string;
+  /** Nesting depth: 0 = root swarm. */
+  depth?: number;
+  /** "agent" for a member agent, "swarm" for a nested sub-swarm. */
+  member_type?: string;
+  /**
+   * Lifecycle status for a member/swarm as observed on the event:
+   * started | completed | failed. Absent on pre-hierarchy backends.
+   */
+  lifecycle?: string;
 }
 
 export interface HealthResponse {
@@ -219,13 +236,6 @@ export type Theme =
   | "dracula"
   | "nord";
 
-export interface ModelPreference {
-  provider: string;
-  model: string;
-}
-
-export type ModelPolicy = "permissive" | "strict" | "";
-
 export interface Agent {
   id: string;
   name: string;
@@ -238,20 +248,6 @@ export interface Agent {
     skills?: string[];
     tools?: string[];
   };
-  /**
-   * Provider/model pairs the agent is intended to run on. Order is
-   * significant — earlier entries are surfaced first by the picker.
-   * Mirrors agent.Manifest.PreferredModels on the Go side.
-   */
-  preferred_models?: ModelPreference[];
-  /**
-   * Controls how preferred_models is interpreted:
-   * - "" or "permissive": every model is allowed; preferred entries
-   *   are ranked first and badged.
-   * - "strict": only preferred entries are selectable; an empty list
-   *   degrades to permissive (avoids locking the user out).
-   */
-  model_policy?: ModelPolicy;
 }
 
 /**

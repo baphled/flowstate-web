@@ -55,6 +55,14 @@ interface BootstrapOptions {
    * can assert the FE sent the correct payload after the click.
    */
   recordedGrantPosts: Array<{ sessionId: string; body: string }>;
+  /**
+   * Cross-tab shared "the grant POST landed" flag. The two-tab R5
+   * regression passes the SAME object to both tabs' bootstrapMocks so
+   * tab A's POST flips the poll sequence for tab B as well (mirrors
+   * the shared backend bus). Single-tab tests omit it and get a
+   * per-page default.
+   */
+  grantPostedRef?: { posted: boolean };
 }
 
 const TURN_ID = "turn-ask-1";
@@ -120,6 +128,7 @@ async function bootstrapMocks(
           createdAt: "2026-05-27T00:00:00Z",
           updatedAt: "2026-05-27T00:00:01Z",
           messageCount: 0,
+          activeTurnId: TURN_ID,
           permissionMode: "ask",
         },
       ]),
@@ -146,7 +155,7 @@ async function bootstrapMocks(
             role: "tool_call",
             content: "",
             toolName: "read",
-            toolInput: { path: "/tmp/data.txt" },
+            toolInput: JSON.stringify({ path: "/tmp/data.txt" }),
             timestamp: "2026-05-27T00:00:01Z",
           },
         ]),
@@ -182,9 +191,23 @@ async function bootstrapMocks(
   // Long-poll endpoint — returns the sequence's i-th entry, then
   // pins on the final step. Each entry is merged onto a base shape
   // so we keep the spec readable.
+  //
+  // The mock only advances the sequence AFTER the spec's grant POST
+  // lands (mirroring the backend: the resolved status appears once an
+  // operator acts). Without this gate the reattach poll (started at
+  // page load by the session summary's activeTurnId) consumes the
+  // pending step and the resolved step back-to-back, unmounting the
+  // prompt before the test can click.
+  const grantPosted = opts.grantPostedRef ?? { posted: false };
+  await page.on("request", (req) => {
+    if (req.method() === "POST" && /\/permission-grant$/.test(req.url())) {
+      grantPosted.posted = true;
+    }
+  });
   let pollIdx = 0;
   await page.route("**/api/v1/sessions/*/turns/*", async (route) => {
-    const step = opts.pollSequence[Math.min(pollIdx, opts.pollSequence.length - 1)];
+    const advanced = grantPosted.posted ? 1 : 0;
+    const step = opts.pollSequence[Math.min(advanced, opts.pollSequence.length - 1)];
     pollIdx += 1;
     await route.fulfill({
       status: 200,
@@ -214,9 +237,6 @@ async function bootstrapMocks(
   await page.addInitScript(
     ({ sessionId, turnId }) => {
       window.localStorage.setItem("chat.currentSessionId", sessionId);
-      // Seed an active turn id so the FE long-poll loop starts on
-      // page load instead of waiting for a fresh POST.
-      window.localStorage.setItem(`chat.activeTurnId.${sessionId}`, turnId);
     },
     { sessionId: SESSION_ID, turnId: TURN_ID },
   );
@@ -422,13 +442,16 @@ test.describe("Permission Mode Ask — two-tab regression (R5 cross-tab guard)",
       },
     ];
 
+    const grantPostedRef = { posted: false };
     await bootstrapMocks(pageA, {
       recordedGrantPosts,
       pollSequence: sharedSeq,
+      grantPostedRef,
     });
     await bootstrapMocks(pageB, {
       recordedGrantPosts,
       pollSequence: sharedSeq,
+      grantPostedRef,
     });
 
     await pageA.goto("/chat");

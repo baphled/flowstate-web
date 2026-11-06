@@ -3,11 +3,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useChatStore } from '@/stores/chatStore'
 import FuzzySearchModal from '@/components/common/FuzzySearchModal.vue'
 import Icon from '@/components/common/Icon.vue'
+import QuestionSelector from '@/components/chat/QuestionSelector.vue'
 import { detectTrigger, insertToken, type TriggerDescriptor } from '@/composables/useInputTriggers'
 import { SLASH_COMMANDS } from '@/commands/slashCommands'
 import type { FuzzySearchItem } from '@/composables/useFuzzyFilter'
 import { showToast } from '@/composables/useToast'
 import { uploadAttachments as apiUploadAttachments } from '@/api'
+import VoiceActivationButton from '@/components/chat/VoiceActivationButton.vue'
 
 defineOptions({ name: 'MessageInput' })
 
@@ -75,6 +77,11 @@ const streamingState = computed(() => store.streamingFor(store.currentSessionId)
 const isStreamingNow = computed(
   () => streamingState.value.isStreaming || streamingState.value.isLoading,
 )
+
+// Aug 2026 — pending blocking questions surface their opencode-style
+// selector cards above the composer (read reactively from the store so
+// the long-poll diff mounts/unmounts them).
+const pendingQuestions = computed(() => Object.values(store.pendingQuestions ?? {}))
 
 // Static slash-command catalogue mirrored from the TUI registry. See
 // web/src/commands/slashCommands.ts for the canonical source-of-truth
@@ -501,6 +508,27 @@ function handleDrop(event: DragEvent): void {
   }
 }
 
+// ---- Voice Push-to-Talk (Aug 2026) ----
+//
+// The mic button (VoiceActivationButton) emits a transcript once the
+// server-side whisper transcription resolves. Insert it at the END of
+// the composer buffer — the common case for push-to-talk is appending
+// dictated text to (or starting) a draft. Keep any history-walk state
+// coherent by dropping back to live mode first, then re-run the
+// trigger detector so a dictated "/cmd" or "@mention" opens the
+// correct picker.
+function handleVoiceTranscript(text: string): void {
+  historyCursor.value = -1
+  liveDraft.value = ''
+  const joiner = inputText.value.length > 0 ? ' ' : ''
+  inputText.value = `${inputText.value}${joiner}${text}`
+  void nextTick(() => {
+    autoResize()
+    recomputeTrigger()
+    textareaRef.value?.focus()
+  })
+}
+
 async function uploadPendingAttachments(): Promise<string[]> {
   // Chat Attachments Backend PR1 (May 2026) — closes the B3
   // silent-file-loss bug. Plan §6 task-05.
@@ -620,6 +648,24 @@ watch(
       visible when isDragging is true; keeps layout stable and avoids
       a mount-time flicker during the first drag.
     -->
+    <!--
+      Opencode CLI pattern (Aug 2026 rework) — when a blocking question
+      is pending, the question selector REPLACES the composer entirely
+      (textarea, attachments, send controls all unmounted) until the
+      answer resolves via the long-poll diff. Keyboard ownership is
+      unambiguous: arrows/space/Enter belong to the selector.
+    -->
+    <template v-if="pendingQuestions.length > 0">
+      <QuestionSelector
+        v-for="pending in pendingQuestions"
+        :key="pending.request_id"
+        :request="pending"
+      />
+      <p class="input-hint">↑↓ move · space select · Enter submit · Esc dismiss</p>
+    </template>
+
+    <template v-else>
+
     <div
       v-if="isDragging"
       class="message-input-drag-overlay"
@@ -704,6 +750,12 @@ watch(
       >
         <Icon name="attach" :size="18" />
       </button>
+      <!--
+        Voice Push-to-Talk (Aug 2026) — hold-to-talk mic button. See
+        VoiceActivationButton.vue for the capture/convert/POST flow and
+        the 501/503 non-blocking hint contract.
+      -->
+      <VoiceActivationButton @transcript="handleVoiceTranscript" />
       <input
         ref="fileInputRef"
         type="file"
@@ -758,11 +810,13 @@ watch(
       </button>
     </div>
 
+    </template>
+
     <p v-if="store.error" class="input-error" data-testid="chat-error">
       {{ store.error }}
     </p>
 
-    <p class="input-hint">Enter to send · Shift+Enter / Alt+Enter for newline · ↑ history · "/" commands · "@" agents</p>
+    <p v-if="pendingQuestions.length === 0" class="input-hint">Enter to send · Shift+Enter / Alt+Enter for newline · ↑ history · "/" commands · "@" agents</p>
 
     <!--
       Slash and mention pickers reuse FuzzySearchModal — the same scaffolding

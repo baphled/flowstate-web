@@ -1,16 +1,28 @@
 import { createRouter, createWebHistory } from "vue-router";
 import ChatView from "@/views/ChatView.vue";
-import SwarmView from "@/views/SwarmView.vue";
-import SettingsView from "@/views/SettingsView.vue";
-import AgentInfoView from "@/views/AgentInfoView.vue";
-import LoginView from "@/views/LoginView.vue";
-import ProviderQuotaDashboardView from "@/views/ProviderQuotaDashboardView.vue";
+
+// Route-level code splitting: the chat surface is the landing experience
+// and stays in the entry chunk; every other view is lazy-loaded so the
+// Shiki grammar set, settings forms, and dashboard tables are paid for
+// only on navigation.
+const SwarmView = () => import("@/views/SwarmView.vue");
+const SettingsView = () => import("@/views/SettingsView.vue");
+const AgentInfoView = () => import("@/views/AgentInfoView.vue");
+const LoginView = () => import("@/views/LoginView.vue");
+const ProviderQuotaDashboardView = () =>
+  import("@/views/ProviderQuotaDashboardView.vue");
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: "/", redirect: "/chat" },
     { path: "/chat", component: ChatView, name: "chat" },
+    // Session-URI feature — unique URL per session. `/chat/s/:id` keeps
+    // the chat family of routes together and avoids colliding with
+    // future top-level segments. Bare `/chat` remains the new/unsaved
+    // session view; deep links land on the same ChatView instance with
+    // the session id as a route param (bound to the store in ChatView).
+    { path: "/chat/s/:id", component: ChatView, name: "chat-session" },
     { path: "/swarm", component: SwarmView, name: "swarm" },
     { path: "/settings", component: SettingsView, name: "settings" },
     { path: "/agents/:id", component: AgentInfoView, name: "agent-info" },

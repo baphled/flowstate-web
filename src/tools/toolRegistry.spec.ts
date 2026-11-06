@@ -47,3 +47,28 @@ describe("toolRegistry", () => {
     expect(isContextTool("bash")).toBe(false);
   });
 });
+
+describe("toolNameBasename / toolNamesMatch / namespaced lookup", () => {
+  it("strips MCP-style namespace prefixes down to the basename", async () => {
+    const { toolNameBasename } = await import("./toolRegistry");
+    expect(toolNameBasename("mcp__fs__question")).toBe("question");
+    expect(toolNameBasename("plugin::question")).toBe("question");
+    expect(toolNameBasename("ns/question")).toBe("question");
+    expect(toolNameBasename("question")).toBe("question");
+  });
+
+  it("matches wire names to message names modulo namespacing", async () => {
+    const { toolNamesMatch } = await import("./toolRegistry");
+    expect(toolNamesMatch("question", "question")).toBe(true);
+    expect(toolNamesMatch("mcp__fs__question", "question")).toBe(true);
+    expect(toolNamesMatch("question", "mcp__fs__question")).toBe(true);
+    expect(toolNamesMatch("question", "read")).toBe(false);
+  });
+
+  it("resolves a namespaced tool name to its bare-name renderer", async () => {
+    const { registerTool, getToolComponent } = await import("./toolRegistry");
+    const QuestionTool = defineComponent({ name: "QuestionTool" });
+    registerTool({ name: "question", component: QuestionTool });
+    expect(getToolComponent("mcp__fs__question")).toBe(QuestionTool);
+  });
+});

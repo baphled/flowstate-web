@@ -1,25 +1,20 @@
 <script setup lang="ts">
-import { computed, ref, toRef } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, toRef } from "vue";
 import { useFocusTrap } from "@/composables/useFocusTrap";
-import { useQuotaStore, snapshotKey, type ProviderQuotaSnapshot } from "@/stores/quotaStore";
+import { useQuotaStore, type ProviderQuotaSnapshot } from "@/stores/quotaStore";
+import Icon from "@/components/common/Icon.vue";
 
 /**
- * ProviderQuotaSummaryModal — modal overview of every known
- * provider/model quota snapshot currently in the in-memory store.
+ * ProviderQuotaSummaryModal — modal showing the provider quota and rate
+ * limit position for every provider+model pair the engine has observed.
  *
- * Reads directly from useQuotaStore().snapshots so the table always
- * reflects the latest SSE / turn-poll data without a separate fetch.
+ * Reads directly from quotaStore.snapshots — no props required. The
+ * modal surfaces all three variant types (rate_limit, token_spend,
+ * not_configured) so the operator can see the state of every configured
+ * provider in one place, not just the active session's provider+model.
  *
- * Columns:
- *   - Provider + Model (grouped by provider)
- *   - Status — colour-coded health indicator
- *   - Key Metric — rate-limit %, token-spend $/cap, or "Not configured"
- *   - Reset / Period — countdown for rate_limit, period label for
- *     token_spend, — for not_configured
- *
- * Clicking a row emits `select` with that snapshot's partition key so
- * the parent can open the deep-dive ProviderQuotaPanel. Close on
- * Escape / backdrop click / X button.
+ * Closes on Escape, on a click outside the panel, and on the X button.
+ * Focus is trapped inside the modal while open.
  */
 defineOptions({ name: "ProviderQuotaSummaryModal" });
 
@@ -29,20 +24,15 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: [];
-  select: [snapshot: ProviderQuotaSnapshot];
 }>();
 
+const quotaStore = useQuotaStore();
 const modalEl = ref<HTMLElement | null>(null);
 
 useFocusTrap(modalEl, toRef(props, "open"));
 
-const quotaStore = useQuotaStore();
-
-/**
- * allSnapshots — flat list of every ProviderQuotaSnapshot currently
- * in the store, sorted by (provider, model) for stable rendering.
- */
-const allSnapshots = computed<ProviderQuotaSnapshot[]>(() => {
+/** All snapshots from the quota store, sorted by provider then model. */
+const entries = computed<ProviderQuotaSnapshot[]>(() => {
   return Object.values(quotaStore.snapshots).sort((a, b) => {
     const pc = a.provider.localeCompare(b.provider);
     if (pc !== 0) return pc;
@@ -50,37 +40,52 @@ const allSnapshots = computed<ProviderQuotaSnapshot[]>(() => {
   });
 });
 
-const isEmpty = computed(() => allSnapshots.value.length === 0);
+/** True when no snapshots have been observed yet. */
+const isEmpty = computed(() => entries.value.length === 0);
 
-function onBackdropClick(): void {
-  emit("close");
-}
+/** True when the only snapshot(s) are not_configured — the engine
+ *  knows about the provider but has no quota signal. */
+const allNotConfigured = computed(() => {
+  if (isEmpty.value) return false;
+  return entries.value.every((e) => e.variant === "not_configured");
+});
 
-function onEscape(event: KeyboardEvent): void {
-  if (event.key === "Escape") {
+function handleKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && props.open) {
+    event.preventDefault();
+    event.stopPropagation();
     emit("close");
   }
 }
 
-function selectSnapshot(snap: ProviderQuotaSnapshot): void {
-  emit("select", snap);
+function handleBackdropClick(): void {
+  emit("close");
 }
 
-/**
- * formatReset — human-readable countdown for rate-limit windows.
- * Renders as "N%" or "N% · resets Xm" when a future reset time is
- * known. Falls back to "—" when tightestPercentRemaining < 0 (the -1
- * no-signal sentinel).
- */
-function formatRateLimit(pct: number, resetIso: string): string {
-  if (pct < 0) return "—";
-  const pctLabel = `${pct}%`;
-  const reset = formatResetCountdown(resetIso);
-  if (reset === "") return pctLabel;
-  return `${pctLabel} · resets ${reset}`;
+function handleCloseButton(): void {
+  emit("close");
 }
 
-function formatResetCountdown(iso: string): string {
+onMounted(() => {
+  document.addEventListener("keydown", handleKeydown, true);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("keydown", handleKeydown, true);
+});
+
+function formatMoney(minor: number, currency: string): string {
+  const major = (minor / 100).toFixed(2);
+  switch (currency) {
+    case "USD": return `$${major}`;
+    case "CNY": return `¥${major}`;
+    case "GBP": return `£${major}`;
+    case "EUR": return `€${major}`;
+    default: return `${currency} ${major}`;
+  }
+}
+
+function formatReset(iso: string): string {
   if (!iso) return "";
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return "";
@@ -96,328 +101,353 @@ function formatResetCountdown(iso: string): string {
   return `${hours}h${minutes.toString().padStart(2, "0")}`;
 }
 
-function formatMoney(minor: number, currency: string): string {
-  const major = (minor / 100).toFixed(2);
-  switch (currency) {
-    case "USD":
-      return `$${major}`;
-    case "CNY":
-      return `¥${major}`;
-    case "GBP":
-      return `£${major}`;
-    case "EUR":
-      return `€${major}`;
-    default:
-      return `${currency} ${major}`;
+/** Human-friendly label for a snapshot's key figure. */
+function summaryLabel(snap: ProviderQuotaSnapshot): string {
+  if (snap.variant === "rate_limit" && snap.rateLimit !== null) {
+    const pct = snap.rateLimit.tightestPercentRemaining;
+    const pctLabel = pct < 0 ? "—" : `${pct}%`;
+    const reset = formatReset(snap.rateLimit.tightestResetAt);
+    if (reset === "") return `${pctLabel} remaining`;
+    return `${pctLabel} remaining · resets ${reset}`;
   }
+  if (snap.variant === "token_spend" && snap.tokenSpend !== null) {
+    const ts = snap.tokenSpend;
+    const spent = formatMoney(ts.spentMinor, ts.spentCurrency);
+    if (ts.capMinor <= 0) return spent;
+    const cap = formatMoney(ts.capMinor, ts.capCurrency || ts.spentCurrency);
+    return `${spent} / ${cap}`;
+  }
+  if (snap.variant === "not_configured" && snap.notConfigured !== null) {
+    return snap.notConfigured.reason;
+  }
+  return "";
 }
 
-function formatTokenSpend(snap: ProviderQuotaSnapshot): string {
-  const ts = snap.tokenSpend;
-  if (ts === null) return "—";
-  const spent = formatMoney(ts.spentMinor, ts.spentCurrency);
-  if (ts.capMinor <= 0) return spent;
-  const cap = formatMoney(ts.capMinor, ts.capCurrency || ts.spentCurrency);
-  return `${spent} / ${cap}`;
+function severityClass(snap: ProviderQuotaSnapshot): string {
+  if (snap.variant === "not_configured") return "severity-neutral";
+  if (snap.variant === "rate_limit" && snap.rateLimit !== null) {
+    const pct = snap.rateLimit.tightestPercentRemaining;
+    if (pct < 0) return "severity-neutral";
+    if (pct < 5) return "severity-danger";
+    if (pct < 20) return "severity-warning";
+    return "severity-neutral";
+  }
+  if (snap.variant === "token_spend" && snap.tokenSpend !== null) {
+    const ts = snap.tokenSpend;
+    if (ts.capMinor <= 0) return "severity-neutral";
+    if (ts.thresholdRed >= 0 && (ts.spentMinor / ts.capMinor) * 100 >= ts.thresholdRed) return "severity-danger";
+    if (ts.thresholdAmber >= 0 && (ts.spentMinor / ts.capMinor) * 100 >= ts.thresholdAmber) return "severity-warning";
+    return "severity-neutral";
+  }
+  return "severity-neutral";
 }
 
-/**
- * statusClass — css class suffix for the status badge colour.
- *   healthy    → green  (default)
- *   rate_limited → amber
- *   exhausted    → red
- *   spent        → amber (approaching / at cap)
- *   ""           → neutral (not_configured / unknown)
- */
-function statusClass(status: string): string {
-  if (status === "healthy") return "summary-status--healthy";
-  if (status === "rate_limited") return "summary-status--rate-limited";
-  if (status === "exhausted") return "summary-status--exhausted";
-  if (status === "spent") return "summary-status--spent";
-  return "summary-status--neutral";
-}
-
-function variantIcon(variant: string): string {
-  if (variant === "rate_limit") return "⊡";
-  if (variant === "token_spend") return "$";
-  return "—";
+function variantLabel(variant: string): string {
+  switch (variant) {
+    case "rate_limit": return "Rate limit";
+    case "token_spend": return "Spend";
+    case "not_configured": return "Not configured";
+    default: return variant;
+  }
 }
 </script>
 
 <template>
   <div
     v-if="open"
-    ref="modalEl"
-    class="summary-backdrop"
-    data-testid="provider-quota-summary-backdrop"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="summary-title"
-    @click.self="onBackdropClick"
-    @keydown="onEscape"
-    tabindex="-1"
+    class="quota-summary-overlay"
+    data-testid="quota-summary-overlay"
+    @click.self="handleBackdropClick"
   >
-    <div class="summary-panel" data-testid="provider-quota-summary-panel">
-      <header class="summary-header">
-        <h2 id="summary-title" class="summary-title">Provider Quota Overview</h2>
+    <div
+      ref="modalEl"
+      class="quota-summary-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Provider quota summary"
+      data-testid="quota-summary-panel"
+    >
+      <header class="quota-summary-header">
+        <h2 class="quota-summary-title">Provider quota summary</h2>
         <button
           type="button"
-          class="summary-close"
-          data-testid="provider-quota-summary-close"
+          class="quota-summary-close"
           aria-label="Close"
-          @click="emit('close')"
+          data-testid="quota-summary-close"
+          @click="handleCloseButton"
         >
-          &times;
+          <Icon name="close" :size="18" />
         </button>
       </header>
 
-      <div v-if="isEmpty" class="summary-empty" data-testid="provider-quota-summary-empty">
-        No quota data yet. The first response will populate provider quota snapshots.
-      </div>
+      <div class="quota-summary-body">
+        <div
+          v-if="isEmpty"
+          class="quota-summary-empty"
+          data-testid="quota-summary-empty"
+        >
+          <p>No provider quota data yet.</p>
+          <p class="quota-summary-empty-hint">
+            Send a message to populate quota information from the engine.
+          </p>
+        </div>
 
-      <table
-        v-else
-        class="summary-table"
-        data-testid="provider-quota-summary-table"
-      >
-        <thead>
-          <tr>
-            <th class="summary-col-provider">Provider</th>
-            <th class="summary-col-model">Model</th>
-            <th class="summary-col-status">Status</th>
-            <th class="summary-col-metric">Key Metric</th>
-            <th class="summary-col-period">Reset / Period</th>
-          </tr>
-        </thead>
-        <tbody>
-            <tr
-            v-for="snap in allSnapshots"
-            :key="snapshotKey(snap.provider, snap.accountHash, snap.model)"
-            class="summary-row"
-            :class="{ 'summary-row--clickable': snap.variant !== 'not_configured' }"
-            data-testid="provider-quota-summary-row"
-            :data-provider="snap.provider"
-            :data-model="snap.model"
-            :data-variant="snap.variant"
-            :data-status="snap.status"
-            @click="selectSnapshot(snap)"
+        <div
+          v-else-if="allNotConfigured"
+          class="quota-summary-all-nc"
+          data-testid="quota-summary-all-nc"
+        >
+          <p>All observed providers are in a <em>not configured</em> state.</p>
+          <p class="quota-summary-all-nc-hint">
+            This is expected when there is no quota store configured, or when
+            each provider's first response has not yet arrived.
+          </p>
+        </div>
+
+        <div
+          v-else
+          class="quota-summary-entries"
+          data-testid="quota-summary-entries"
+        >
+          <div
+            v-for="(entry, idx) in entries"
+            :key="`${entry.provider}:${entry.accountHash}:${entry.model}`"
+            class="quota-summary-entry"
+            :class="[severityClass(entry), {
+              'entry-stale': entry.stale,
+              'entry-not-configured': entry.variant === 'not_configured',
+            }]"
+            :data-testid="`quota-summary-entry-${idx}`"
+            :data-variant="entry.variant"
+            :data-severity="severityClass(entry).replace('severity-', '')"
           >
-            <td class="summary-cell" data-testid="summary-cell-provider">
-              <span class="summary-variant-icon">{{ variantIcon(snap.variant) }}</span>
-              {{ snap.provider }}
-            </td>
-            <td class="summary-cell summary-cell--mono" data-testid="summary-cell-model">
-              {{ snap.model }}
-            </td>
-            <td class="summary-cell" data-testid="summary-cell-status">
+            <div class="entry-header">
               <span
-                class="summary-status-badge"
-                :class="statusClass(snap.status)"
-                data-testid="summary-status-badge"
+                class="entry-provider"
+                data-testid="entry-provider"
               >
-                {{ snap.status || "—" }}
+                {{ entry.provider }}
               </span>
-            </td>
-            <td class="summary-cell summary-cell--mono" data-testid="summary-cell-metric">
-              <template v-if="snap.variant === 'rate_limit' && snap.rateLimit !== null">
-                {{ formatRateLimit(snap.rateLimit.tightestPercentRemaining, snap.rateLimit.tightestResetAt) }}
-              </template>
-              <template v-else-if="snap.variant === 'token_spend'">
-                {{ formatTokenSpend(snap) }}
-              </template>
-              <template v-else-if="snap.variant === 'not_configured' && snap.notConfigured !== null">
-                <span
-                  class="summary-not-configured"
-                  :title="snap.notConfigured.reason"
-                >
-                  Not configured
-                </span>
-              </template>
-            </td>
-            <td class="summary-cell summary-cell--mono summary-cell--muted" data-testid="summary-cell-period">
-              <template v-if="snap.variant === 'rate_limit' && snap.rateLimit !== null">
-                {{ formatResetCountdown(snap.rateLimit.tightestResetAt) || "—" }}
-              </template>
-              <template v-else-if="snap.variant === 'token_spend' && snap.tokenSpend !== null">
-                {{ snap.tokenSpend.period }}
-              </template>
-              <template v-else>
-                —
-              </template>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+              <span
+                class="entry-model"
+                data-testid="entry-model"
+              >
+                {{ entry.model }}
+              </span>
+              <span
+                class="entry-variant-badge"
+                :class="`badge--${entry.variant}`"
+                data-testid="entry-variant-badge"
+              >
+                {{ variantLabel(entry.variant) }}
+              </span>
+            </div>
+            <div
+              class="entry-summary"
+              :class="{ 'entry-summary--muted': entry.variant === 'not_configured' }"
+              data-testid="entry-summary"
+            >
+              {{ summaryLabel(entry) }}
+            </div>
+            <div
+              v-if="entry.stale"
+              class="entry-stale-tag"
+              data-testid="entry-stale-tag"
+            >
+              Stale
+            </div>
+            <div
+              class="entry-observed-at"
+              data-testid="entry-observed-at"
+            >
+              Observed: {{ entry.observedAt ? new Date(entry.observedAt).toLocaleString() : "—" }}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.summary-backdrop {
+.quota-summary-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.quota-summary-panel {
+  width: 520px;
+  max-width: calc(100vw - 2rem);
+  max-height: 70vh;
+  background: var(--bg-primary, #1a1a2e);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.quota-summary-header {
   display: flex;
   align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
-
-.summary-panel {
-  background: var(--bg-secondary, #1a1b26);
-  color: var(--text-primary, #f5f5f5);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
-  border-radius: var(--radius, 8px);
-  padding: 1.5rem;
-  width: min(720px, 92vw);
-  max-height: 80vh;
-  overflow-y: auto;
-  position: relative;
-}
-
-.summary-header {
-  display: flex;
   justify-content: space-between;
-  align-items: baseline;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
 }
 
-.summary-title {
+.quota-summary-title {
   margin: 0;
   font-size: 1rem;
   font-weight: 600;
-}
-
-.summary-close {
-  background: transparent;
-  border: none;
-  color: var(--text-muted, #b0b0b0);
-  font-size: 1.4rem;
-  cursor: pointer;
-  padding: 0 0.3rem;
-  line-height: 1;
-}
-
-.summary-close:hover {
   color: var(--text-primary, #f5f5f5);
 }
 
-.summary-empty {
+.quota-summary-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted, #b0b0b0);
+  cursor: pointer;
+}
+.quota-summary-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary, #f5f5f5);
+}
+
+.quota-summary-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+}
+
+.quota-summary-empty,
+.quota-summary-all-nc {
   text-align: center;
   padding: 2rem 1rem;
   color: var(--text-muted, #b0b0b0);
+}
+
+.quota-summary-empty p,
+.quota-summary-all-nc p {
+  margin: 0.25rem 0;
+}
+
+.quota-summary-empty-hint,
+.quota-summary-all-nc-hint {
   font-size: 0.85rem;
+  color: var(--text-muted, #888);
 }
 
-.summary-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.82rem;
+.quota-summary-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
 }
 
-.summary-table th {
-  text-align: left;
-  padding: 0.35rem 0.5rem;
-  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
-  font-weight: 500;
-  color: var(--text-secondary, #d0d0d0);
-  white-space: nowrap;
+.quota-summary-entry {
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: background 0.15s;
+}
+.quota-summary-entry:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
-.summary-table td {
-  padding: 0.4rem 0.5rem;
-  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.05));
+.entry-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
 }
 
-.summary-row {
-  transition: background 0.1s ease;
-}
-
-.summary-row--clickable {
-  cursor: pointer;
-}
-
-.summary-row--clickable:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.summary-cell {
-  vertical-align: middle;
-}
-
-.summary-cell--mono {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.8rem;
-}
-
-.summary-cell--muted {
-  color: var(--text-muted, #b0b0b0);
-}
-
-.summary-col-provider {
-  width: 18%;
-}
-
-.summary-col-model {
-  width: 24%;
-}
-
-.summary-col-status {
-  width: 12%;
-}
-
-.summary-col-metric {
-  width: 28%;
-}
-
-.summary-col-period {
-  width: 18%;
-}
-
-.summary-variant-icon {
-  display: inline-block;
-  width: 1.2rem;
-  color: var(--text-muted, #b0b0b0);
+.entry-provider {
   font-weight: 600;
+  color: var(--text-primary, #f5f5f5);
+  font-size: 0.9rem;
+  text-transform: capitalize;
 }
 
-.summary-status-badge {
-  display: inline-block;
-  padding: 0.1rem 0.45rem;
-  border-radius: var(--radius, 4px);
-  font-size: 0.75rem;
-  font-weight: 500;
+.entry-model {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  color: var(--text-muted, #b0b0b0);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.summary-status--healthy {
-  background: color-mix(in srgb, var(--success, #22c55e) 15%, transparent);
-  color: var(--success, #22c55e);
+.entry-variant-badge {
+  font-size: 0.7rem;
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  font-weight: 500;
+  flex-shrink: 0;
 }
-
-.summary-status--rate-limited {
-  background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent);
-  color: var(--warning, #f59e0b);
+.badge--rate_limit {
+  background: color-mix(in srgb, var(--info, #5898d4) 15%, transparent);
+  color: var(--info, #5898d4);
 }
-
-.summary-status--exhausted {
-  background: color-mix(in srgb, var(--error, #dc2626) 18%, transparent);
-  color: var(--error, #dc2626);
+.badge--token_spend {
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 15%, transparent);
+  color: var(--accent, #8b5cf6);
 }
-
-.summary-status--spent {
-  background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent);
-  color: var(--warning, #f59e0b);
-}
-
-.summary-status--neutral {
-  background: rgba(255, 255, 255, 0.05);
+.badge--not_configured {
+  background: color-mix(in srgb, var(--text-muted, #b0b0b0) 15%, transparent);
   color: var(--text-muted, #b0b0b0);
 }
 
-.summary-not-configured {
-  cursor: help;
-  border-bottom: 1px dashed var(--text-muted, #b0b0b0);
+.entry-summary {
+  font-size: 0.88rem;
+  color: var(--text-primary, #f5f5f5);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.entry-summary--muted {
+  color: var(--text-muted, #b0b0b0);
+  font-style: italic;
+}
+
+.entry-stale-tag {
+  display: inline-block;
+  font-size: 0.7rem;
+  padding: 0.08rem 0.35rem;
+  margin-top: 0.25rem;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--warning, #f0a030) 18%, transparent);
+  color: var(--warning, #f0a030);
+  font-weight: 500;
+}
+
+.entry-observed-at {
+  font-size: 0.72rem;
+  color: var(--text-muted, #888);
+  margin-top: 0.3rem;
+}
+
+.quota-summary-entry.severity-warning {
+  border-left: 3px solid var(--warning, #f0a030);
+}
+.quota-summary-entry.severity-danger {
+  border-left: 3px solid var(--error, #e74c3c);
+}
+.quota-summary-entry.severity-neutral {
+  border-left: 3px solid transparent;
+}
+
+.entry-not-configured {
+  opacity: 0.7;
 }
 </style>

@@ -1065,7 +1065,13 @@ describe('ChatView agent-activity indicator', () => {
     expect(wrapper.find('[data-testid="agent-activity-model"]').exists()).toBe(false)
   })
 
-  it('shows concurrent delegated agent actions in the activity indicator when delegations are in-flight', async () => {
+  it('does not duplicate delegation activity in the indicator — the delegation card is the single surface', async () => {
+    // Delegation single-surface (Sept 2026 UI audit, issue 1): the
+    // in-flight delegation card in the thread carries the delegated
+    // agent's name, latest tool and content. The activity indicator no
+    // longer mirrors that data (the removed activeDelegations listing
+    // was a second delegation surface) — while delegations are
+    // in-flight the indicator falls back to the model info chip.
     const wrapper = mount(ChatView, {
       global: {
         stubs: {
@@ -1079,7 +1085,8 @@ describe('ChatView agent-activity indicator', () => {
     const chatStore = useChatStore()
     chatStore.isStreaming = true
     chatStore.agentId = 'team-lead'
-    // Add two concurrent active delegations
+    chatStore.currentModelId = 'glm-4.6'
+    chatStore.currentProviderId = 'zai'
     const msg1 = {
       id: 'msg-1',
       role: 'delegation_started',
@@ -1103,18 +1110,10 @@ describe('ChatView agent-activity indicator', () => {
     ;(chatStore as any).messages = [msg1, msg2]
     await wrapper.vm.$nextTick()
 
-    const container = wrapper.find('[data-testid="agent-activity-delegations"]')
-    expect(container.exists()).toBe(true)
-
-    const chips = wrapper.findAll('[data-testid="agent-activity-delegation"]')
-    expect(chips).toHaveLength(2)
-    expect(chips[0].text()).toContain('planner')
-    expect(chips[0].text()).toContain('read')
-    expect(chips[1].text()).toContain('coder')
-    expect(chips[1].text()).toContain('write')
-
-    // Model fallback chip should NOT appear when delegations are active
-    expect(wrapper.find('[data-testid="agent-activity-model"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="agent-activity-delegations"]').exists()).toBe(false)
+    const modelChip = wrapper.find('[data-testid="agent-activity-model"]')
+    expect(modelChip.exists()).toBe(true)
+    expect(modelChip.text()).toContain('glm-4.6')
   })
 
   it('shows the agent-activity-indicator for the active session when its per-session streamingFor reports isStreaming=true (no global flag)', async () => {
@@ -2010,5 +2009,148 @@ describe('ChatView swarm reattach on session-change (Bug-O)', () => {
     expect(lastCall[0]).toBe('session-parent')
 
     wrapper.unmount()
+  })
+})
+
+// Session-URI T2/T4/T5 — route-param ↔ store binding in ChatView.
+import { createRouter, createMemoryHistory } from 'vue-router'
+
+async function makeSessionUriRouter(startPath: string) {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/chat', name: 'chat', component: ChatView },
+      { path: '/chat/s/:id', name: 'chat-session', component: ChatView },
+    ],
+  })
+  router.push(startPath)
+  await router.isReady()
+  return router
+}
+
+describe('ChatView session-URI binding', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('loads the session named by the /chat/s/:id route param on mount', async () => {
+    const chatStore = useChatStore()
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    chatStore.loadSessionMessages = loadSpy
+
+    const router = await makeSessionUriRouter('/chat/s/session-12345678')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(loadSpy).toHaveBeenCalledWith('session-12345678')
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-12345678')
+  })
+
+  it('does not double-load when currentSessionId already matches the route param', async () => {
+    const chatStore = useChatStore()
+    chatStore.currentSessionId = 'session-12345678'
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    chatStore.loadSessionMessages = loadSpy
+
+    const router = await makeSessionUriRouter('/chat/s/session-12345678')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(loadSpy).not.toHaveBeenCalled()
+  })
+
+  it('updates the URL when currentSessionId changes (lazy-create sync)', async () => {
+    const router = await makeSessionUriRouter('/chat')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const chatStore = useChatStore()
+    chatStore.currentSessionId = 'session-created-lazily'
+    await flushPromises()
+    await nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-created-lazily')
+  })
+
+  it('replaces the URL with /chat/s/:id when a delegation card click loads a child session', async () => {
+    const chatStore = useChatStore()
+    chatStore.bootstrapComplete = true
+    chatStore.chainSessions['chain-1'] = 'session-child-001'
+    chatStore.sessions = [
+      { id: 'session-child-001', agentId: 'executor', title: 'Delegated Run' },
+    ] as never
+    chatStore.loadSessionMessages = vi.fn(async (sessionId: string) => {
+      chatStore.currentSessionId = sessionId
+    })
+
+    const router = await makeSessionUriRouter('/chat')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const loaded = await chatStore.loadSessionForDelegation({ chainId: 'chain-1' })
+    expect(loaded).toBe(true)
+    await flushPromises()
+    await nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-child-001')
+  })
+
+  it('redirects to /chat when the session in the URL fails to load (unknown id)', async () => {
+    const chatStore = useChatStore()
+    chatStore.loadSessionMessages = vi.fn().mockRejectedValue(new Error('session_not_found'))
+
+    const router = await makeSessionUriRouter('/chat/s/session-doesnotexist')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/chat')
+  })
+})
+
+// Session-URI T4 — lazy-create on first send must land the new session
+// id in the URL once the store mints it.
+describe('ChatView lazy-create URL sync', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('replaces the URL with /chat/s/:id when sendMessage lazily creates a session', async () => {
+    const chatStore = useChatStore()
+    const router = await makeSessionUriRouter('/chat')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    // Simulate the lazy-create branch of sendMessage: currentSessionId
+    // flips from null to a freshly-minted id mid-send.
+    chatStore.currentSessionId = 'session-lazy-9999'
+    await flushPromises()
+    await nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/chat/s/session-lazy-9999')
+  })
+})
+
+// Session-URI T5 — unknown session id in a deep-linked URL surfaces a
+// toast and bounces to /chat (extended contract beyond the bare
+// redirect already covered above).
+describe('ChatView unknown-session deep-link handling', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('shows an error toast when the deep-linked session id is unknown', async () => {
+    const toastMod = await import('@/composables/useToast')
+    const toastSpy = vi.spyOn(toastMod, 'showToast').mockImplementation(() => 0)
+
+    const chatStore = useChatStore()
+    chatStore.loadSessionMessages = vi.fn().mockRejectedValue(new Error('session_not_found'))
+
+    const router = await makeSessionUriRouter('/chat/s/session-ghost')
+    mount(ChatView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(toastSpy).toHaveBeenCalledWith(expect.objectContaining({ variant: 'error' }))
+    expect(router.currentRoute.value.path).toBe('/chat')
+    toastSpy.mockRestore()
   })
 })

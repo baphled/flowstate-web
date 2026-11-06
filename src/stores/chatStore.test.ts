@@ -21,6 +21,7 @@ function installLocalStorageStub(): void {
   Object.defineProperty(window, 'localStorage', { value: stub, configurable: true })
 }
 import {
+  cancelTurn,
   compactSessionNow,
   cancelQueuedPrompt,
   createSession,
@@ -203,6 +204,22 @@ vi.mock('../api', () => ({
   // for the idempotent-404 branch.
   cancelQueuedPrompt: vi.fn((_sessionId: string, _promptId: string) =>
     Promise.resolve({ status: 'cancelled' }),
+  ),
+  // Session Cancel (Aug 2026) — DELETE /sessions/{sid}/turns/{tid}
+  // seam for the Escape-Escape / Stop-button cancel cascade. Default
+  // mock resolves with a cancelled TurnState snapshot; tests override
+  // with mockRejectedValueOnce to exercise the fire-and-forget path.
+  cancelTurn: vi.fn((sessionId: string, turnId: string) =>
+    Promise.resolve({
+      turn_id: turnId,
+      session_id: sessionId,
+      status: 'cancelled',
+      started_at: '',
+      completed_at: '',
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [],
+    }),
   ),
   // Backend-owned prompt queue (May 2026) — typed errors the store
   // branches on with instanceof. Must be real classes (not plain
@@ -4699,6 +4716,245 @@ describe('chatStore - applyDelegationEvent', () => {
 
     const delegation = store.messages.find((m) => m.role === 'delegation_started')
     expect(delegation?.providerName).toBe('openai')
+  })
+})
+
+/**
+ * Fixture: a completed delegation thread as the backend persists it.
+ * The parent called the `task` tool, the engine emitted a
+ * `delegation_started` row when the child spawned and a terminal
+ * `delegation` row when it finished. The backend does not persist
+ * chain_id on the `task` rows, so a cold load must re-establish that
+ * identity and retire the started row for the single-surface contract
+ * (one delegation card per chain).
+ */
+function makeCompletedDelegationThread(): Array<Record<string, unknown>> {
+  return [
+    { id: 'u1', role: 'user', content: 'delegate this', timestamp: '2026-09-01T09:00:00Z' },
+    { id: 'tc1', role: 'tool_call', toolName: 'task', content: '', timestamp: '2026-09-01T09:00:01Z', toolInput: '{"agent":"executor","description":"Implement the user model"}' },
+    { id: 'ds1', role: 'delegation_started', content: '', timestamp: '2026-09-01T09:00:01Z', status: 'running', chainId: 'chain-1', targetAgent: 'executor', description: 'Implement the user model' },
+    { id: 'tr1', role: 'tool_result', toolName: 'task', content: 'child finished', timestamp: '2026-09-01T09:00:08Z' },
+    { id: 'd1', role: 'delegation', content: '│ executor [completed]', timestamp: '2026-09-01T09:00:08Z', status: 'completed', chainId: 'chain-1', targetAgent: 'executor', description: 'Implement the user model' },
+  ]
+}
+
+describe('chatStore - delegation single-surface (started-row retirement + task-row identity)', () => {
+  beforeEach(() => {
+    installLocalStorageStub()
+    vi.clearAllMocks()
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('poll merge retires the delegation_started row and links the task tool rows when the terminal delegation row lands', async () => {
+    vi.useFakeTimers()
+    const store = useChatStore()
+    store.agentId = 'agent-1'
+    store.currentSessionId = 'session-d1'
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'delegate this', timestamp: '' },
+    ]
+
+    const fs = vi.mocked(fetchSessions)
+    fs.mockReset()
+    fs.mockResolvedValue([])
+
+    const ft = vi.mocked(fetchTurn)
+    ft.mockReset()
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d1',
+      session_id: 'session-d1',
+      status: 'running',
+      started_at: '',
+      completed_at: null,
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [
+        { id: 'tc1', role: 'tool_call', toolName: 'task', content: '', timestamp: '', toolInput: '{"agent":"executor"}' },
+        { id: 'ds1', role: 'delegation_started', content: '', timestamp: '', status: 'running', chainId: 'chain-1', targetAgent: 'executor' },
+      ],
+    } as never)
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d1',
+      session_id: 'session-d1',
+      status: 'running',
+      started_at: '',
+      completed_at: null,
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [
+        { id: 'tr1', role: 'tool_result', toolName: 'task', content: 'child finished', timestamp: '' },
+        { id: 'd1', role: 'delegation', content: '│ executor [completed]', timestamp: '', status: 'completed', chainId: 'chain-1', targetAgent: 'executor' },
+      ],
+    } as never)
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d1',
+      session_id: 'session-d1',
+      status: 'completed',
+      started_at: '',
+      completed_at: '',
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [],
+    } as never)
+
+    const pollPromise = store.pollTurnUntilTerminal('session-d1', 'turn-d1')
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    await pollPromise
+
+    expect(store.messages.filter((m) => m.role === 'delegation_started')).toHaveLength(0)
+    const terminal = store.messages.filter((m) => m.role === 'delegation')
+    expect(terminal).toHaveLength(1)
+    expect(terminal[0].id).toBe('d1')
+    expect(store.messages.find((m) => m.id === 'tc1')?.chainId).toBe('chain-1')
+    expect(store.messages.find((m) => m.id === 'tr1')?.chainId).toBe('chain-1')
+  })
+
+  it('poll merge retirement matches chainId exactly — a different chain\'s delegation_started row survives', async () => {
+    vi.useFakeTimers()
+    const store = useChatStore()
+    store.agentId = 'agent-1'
+    store.currentSessionId = 'session-d2'
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'delegate twice', timestamp: '' },
+    ]
+
+    const fs = vi.mocked(fetchSessions)
+    fs.mockReset()
+    fs.mockResolvedValue([])
+
+    const ft = vi.mocked(fetchTurn)
+    ft.mockReset()
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d2',
+      session_id: 'session-d2',
+      status: 'running',
+      started_at: '',
+      completed_at: null,
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [
+        { id: 'ds-a', role: 'delegation_started', content: '', timestamp: '', status: 'running', chainId: 'chain-a', targetAgent: 'researcher' },
+        { id: 'd-b', role: 'delegation', content: '│ executor [completed]', timestamp: '', status: 'completed', chainId: 'chain-b', targetAgent: 'executor' },
+      ],
+    } as never)
+    ft.mockResolvedValueOnce({
+      turn_id: 'turn-d2',
+      session_id: 'session-d2',
+      status: 'completed',
+      started_at: '',
+      completed_at: '',
+      model: { provider: '', model: '' },
+      error: '',
+      messages: [],
+    } as never)
+
+    const pollPromise = store.pollTurnUntilTerminal('session-d2', 'turn-d2')
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    await pollPromise
+
+    expect(store.messages.find((m) => m.id === 'ds-a')).toBeDefined()
+    expect(store.messages.find((m) => m.id === 'd-b')).toBeDefined()
+  })
+
+  it('applyDelegationEvent retires the matching delegation_started row and links the task tool row on a completed event', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'plan something', timestamp: '2026-05-04T00:00:00Z' },
+      { id: 'tc1', role: 'tool_call', toolName: 'task', content: '', timestamp: '2026-05-04T00:00:01Z', toolInput: '{"agent":"executor","description":"Implement the user model"}' },
+      {
+        id: 'd1',
+        role: 'delegation_started',
+        content: '',
+        timestamp: '2026-05-04T00:00:01Z',
+        chainId: 'chain-1',
+        targetAgent: 'executor',
+        status: 'running',
+      },
+    ]
+
+    store.applyDelegationEvent(
+      { kind: 'delegation', raw: '', targetAgent: 'executor', chainId: 'chain-1', status: 'completed', description: 'Implement the user model' },
+    )
+
+    expect(store.messages.filter((m) => m.role === 'delegation_started')).toHaveLength(0)
+    expect(store.messages.find((m) => m.id === 'u1')).toBeDefined()
+    expect(store.messages.find((m) => m.id === 'tc1')?.chainId).toBe('chain-1')
+  })
+
+  it('applyDelegationEvent leaves the delegation_started row in place for non-terminal events', () => {
+    const store = useChatStore()
+    store.messages = [
+      { id: 'u1', role: 'user', content: 'plan something', timestamp: '2026-05-04T00:00:00Z' },
+      {
+        id: 'd1',
+        role: 'delegation_started',
+        content: '',
+        timestamp: '2026-05-04T00:00:01Z',
+        chainId: 'chain-1',
+        targetAgent: 'executor',
+        status: 'running',
+      },
+    ]
+
+    store.applyDelegationEvent(
+      { kind: 'delegation', raw: '', chainId: 'chain-1', toolCalls: 3, lastTool: 'bash', status: 'running' },
+    )
+
+    const started = store.messages.filter((m) => m.role === 'delegation_started')
+    expect(started).toHaveLength(1)
+    expect(started[0].toolCalls).toBe(3)
+  })
+
+  it('cold load retires the completed chain\'s started row and stamps delegation identity onto the task tool rows', async () => {
+    vi.mocked(fetchSessions).mockResolvedValueOnce([
+      {
+        id: 'session-cold',
+        agentId: 'agent-1',
+        title: 'Cold Thread',
+        createdAt: '',
+        updatedAt: '',
+        messageCount: 5,
+        status: 'active',
+        depth: 0,
+        isStreaming: false,
+      },
+    ])
+    vi.mocked(fetchSessionMessages).mockResolvedValueOnce(
+      makeCompletedDelegationThread() as never,
+    )
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.loadSessionMessages('session-cold')
+
+    expect(store.messages.filter((m) => m.role === 'delegation_started')).toHaveLength(0)
+    expect(store.messages.find((m) => m.id === 'd1')).toBeDefined()
+    expect(store.messages.find((m) => m.id === 'd1')?.durationMs).toBe(7000)
+    expect(store.messages.find((m) => m.id === 'tc1')?.chainId).toBe('chain-1')
+    expect(store.messages.find((m) => m.id === 'tr1')?.chainId).toBe('chain-1')
+  })
+
+  it('reconcileFromBackend re-establishes delegation identity on the merged history', async () => {
+    const store = useChatStore()
+    store.agentId = 'agent-1'
+    store.currentSessionId = 'session-rec'
+
+    vi.mocked(fetchSessionMessages).mockResolvedValueOnce(
+      makeCompletedDelegationThread() as never,
+    )
+
+    await store.reconcileFromBackend('session-rec')
+
+    expect(store.messages.filter((m) => m.role === 'delegation_started')).toHaveLength(0)
+    expect(store.messages.find((m) => m.id === 'tc1')?.chainId).toBe('chain-1')
   })
 })
 
@@ -9893,6 +10149,10 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
   it('clears the session-streaming gate when Escape-Escape fires during the loading-but-not-yet-streaming window', async () => {
     const store = useChatStore()
     store.currentSessionId = 'session-pre-stream'
+    // The POST has resolved and the long-poll has armed, so the turn id
+    // is already registered (chatStore.ts:2702 sets it before the first
+    // fetchTurn). The DELETE cancel must fire against it.
+    store.lastPollTurnIdBySession['session-pre-stream'] = 'turn-pre-stream'
 
     // Reproduce the exact pre-stream window: sendMessage has set
     // isLoading=true (chatStore.ts:2589) but no chunk has arrived yet
@@ -9910,6 +10170,11 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
     const slot = store.sessionStreaming['session-pre-stream']
     expect(slot?.isLoading).toBe(false)
     expect(slot?.isStreaming).toBe(false)
+
+    // Session Cancel (Aug 2026): the confirmed chord now fires the
+    // server-side DELETE so the engine stops — no more cosmetic-only
+    // UI clear while the turn drains to natural completion.
+    expect(vi.mocked(cancelTurn)).toHaveBeenCalledWith('session-pre-stream', 'turn-pre-stream')
   })
 
   it('still cancels during the chunk-arriving window (regression guard for the existing happy-path)', async () => {
@@ -9918,6 +10183,7 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
     // narrow it.
     const store = useChatStore()
     store.currentSessionId = 'session-streaming'
+    store.lastPollTurnIdBySession['session-streaming'] = 'turn-streaming'
     store.setSessionStreaming('session-streaming', { isLoading: true, isStreaming: true })
 
     await store.handleEscapeKey()
@@ -9926,6 +10192,7 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
     const slot = store.sessionStreaming['session-streaming']
     expect(slot?.isLoading).toBe(false)
     expect(slot?.isStreaming).toBe(false)
+    expect(vi.mocked(cancelTurn)).toHaveBeenCalledWith('session-streaming', 'turn-streaming')
   })
 
   it('does NOT cancel when neither isLoading nor isStreaming is true (no spurious clears on an idle session)', async () => {
@@ -9946,6 +10213,9 @@ describe('chatStore - handleEscapeKey cancels during the pre-stream loading wind
 
     const after = store.sessionStreaming['session-idle']
     expect(after).toBe(before)
+    // The gate returns before the cancel branch — no server DELETE
+    // fires for an idle session.
+    expect(vi.mocked(cancelTurn)).not.toHaveBeenCalled()
   })
 })
 
@@ -10311,5 +10581,92 @@ describe('chatStore - live session-bleed bug bundle (May 2026)', () => {
     expect(store.tokenCountBySession['session-new']).toBeUndefined()
     expect(store.tokensPerSecondBySession['session-new']).toBeUndefined()
     expect(store.lastHeartbeatAtBySession['session-new']).toBeUndefined()
+  })
+})
+
+describe('chatStore - bootstrapComplete gate', () => {
+  beforeEach(() => {
+    installLocalStorageStub()
+    vi.clearAllMocks()
+    setActivePinia(createPinia())
+  })
+
+  it('bootstrapComplete is false before bootstrap() settles', () => {
+    const store = useChatStore()
+    expect(store.bootstrapComplete).toBe(false)
+  })
+
+  it('bootstrapComplete flips to true after bootstrap() resolves', async () => {
+    const store = useChatStore()
+    await store.bootstrap()
+    expect(store.bootstrapComplete).toBe(true)
+  })
+
+  it('bootstrapComplete flips to true even when bootstrap() rejects', async () => {
+    vi.mocked(fetchSessions).mockRejectedValueOnce(new Error('boom'))
+    const store = useChatStore()
+    await expect(store.bootstrap()).rejects.toThrow('boom')
+    expect(store.bootstrapComplete).toBe(true)
+  })
+
+  it('bootstrap() is a singleton — second call reuses the same promise and does not double-fetch', async () => {
+    const store = useChatStore()
+    const p1 = store.bootstrap()
+    const p2 = store.bootstrap()
+    await Promise.all([p1, p2])
+    expect(vi.mocked(fetchAgents)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(fetchSessions)).toHaveBeenCalledTimes(1)
+  })
+
+  it('a route-param session load survives bootstrap: currentSessionId is not clobbered by restoreStateFromBackend', async () => {
+    // Simulate ChatView's mount order: the route→store watcher fires
+    // loadSessionMessages('session-2') BEFORE bootstrap's
+    // restoreStateFromBackend settles. localStorage has a different
+    // persisted session ('session-1') from a previous page-load, so
+    // an unguarded restore would clobber currentSessionId back to
+    // session-1. The fix: restoreStateFromBackend must not overwrite
+    // a currentSessionId that was set after the store was created
+    // (i.e. by a route-param load racing bootstrap).
+    window.localStorage.setItem('chat.currentSessionId', 'session-1')
+
+    vi.mocked(fetchSessions).mockResolvedValueOnce([
+      {
+        id: 'session-1',
+        agentId: 'agent-1',
+        title: 'Session 1',
+        createdAt: '',
+        updatedAt: '',
+        messageCount: 0,
+        status: 'active',
+        depth: 0,
+        isStreaming: false,
+      },
+      {
+        id: 'session-2',
+        agentId: 'agent-1',
+        title: 'Session 2',
+        createdAt: '',
+        updatedAt: '',
+        messageCount: 0,
+        status: 'active',
+        depth: 0,
+        isStreaming: false,
+      },
+    ])
+
+    const store = useChatStore()
+
+    // Route watcher wins the race: loads session-2 while bootstrap is
+    // still in flight. Kick bootstrap off but do not await.
+    const bootstrapPromise = store.bootstrap()
+    // Simulate the route watcher firing mid-bootstrap (after bootstrap
+    // started, before it settles).
+    const loadPromise = store.loadSessionMessages('session-2')
+
+    await Promise.all([bootstrapPromise, loadPromise])
+
+    // The route-param session must survive: restoreStateFromBackend
+    // must not clobber it back to the persisted session-1.
+    expect(store.currentSessionId).toBe('session-2')
   })
 })

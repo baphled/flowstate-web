@@ -2,10 +2,53 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   sendSessionMessage,
   fetchTurn,
+  fetchSessionMessages,
   cancelQueuedPrompt,
   QueueFullError,
   QueuedPromptNotFoundError,
 } from "./index";
+
+describe("fetchSessionMessages", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("requests with credentials include and cache no-store so no stale payload is served", async () => {
+    await fetchSessionMessages("sess-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toMatch(/\/v1\/sessions\/sess-1\/messages$/);
+    expect((init as RequestInit | undefined)?.credentials).toBe("include");
+    expect((init as RequestInit | undefined)?.cache).toBe("no-store");
+  });
+
+  it("returns [] when the payload body is null", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("null", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const result = await fetchSessionMessages("sess-2");
+    expect(result).toEqual([]);
+  });
+});
 
 describe("sendSessionMessage", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -151,14 +194,16 @@ describe("sendSessionMessage", () => {
   // mirrors the entry locally (promptId + queuePosition) instead of
   // keeping a client-side copy, so the response must be discriminated
   // from the normal turn_id/snapshot shape.
-  it("returns a queued result with promptId + queuePosition on 202 status queued", async () => {
+  it("returns a queued result with promptId + queuePosition on 202 queued (server-authoritative wire format)", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
-          status: "queued",
+          queued: true,
           session_id: "sess-1",
-          queuePosition: 2,
-          promptId: "prompt-abc",
+          queue_position: 2,
+          prompt_id: "prompt-abc",
+          active_turn_id: "turn-in-flight",
+          turn_id: "",
         }),
         { status: 202, headers: { "Content-Type": "application/json" } },
       ),
@@ -171,6 +216,7 @@ describe("sendSessionMessage", () => {
       expect(result.sessionId).toBe("sess-1");
       expect(result.promptId).toBe("prompt-abc");
       expect(result.queuePosition).toBe(2);
+      expect(result.activeTurnId).toBe("turn-in-flight");
     }
   });
 
@@ -199,7 +245,9 @@ describe("sendSessionMessage", () => {
   // Defence-in-depth: a non-queue 202 (some intermediate proxy or a
   // future backend shape) must fall through to the normal turn_id/snapshot
   // normalisation instead of crashing or being misread as a queued result.
-  it("normalises a 202 without status queued to the turn shape", async () => {
+  it("treats any HTTP 202 as queued regardless of body fields (status code is authoritative)", async () => {
+    // The BE may return 202 without the `queued` boolean (omitempty on
+    // the Go side). The HTTP status code is the sole queue discriminant.
     const sessionPayload = {
       id: "sess-1",
       agentId: "agent-1",
@@ -215,7 +263,7 @@ describe("sendSessionMessage", () => {
       new Response(
         JSON.stringify({
           ...sessionPayload,
-          turn_id: "turn-202",
+          turn_id: "",
           snapshot: sessionPayload,
         }),
         { status: 202, headers: { "Content-Type": "application/json" } },
@@ -224,9 +272,7 @@ describe("sendSessionMessage", () => {
 
     const result = await sendSessionMessage("sess-1", "hello");
 
-    expect(result.queued).toBe(false);
-    if (result.queued) throw new Error("expected non-queued result");
-    expect(result.turnId).toBe("turn-202");
+    expect(result.queued).toBe(true);
   });
 });
 

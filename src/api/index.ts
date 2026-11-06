@@ -182,6 +182,7 @@ export async function fetchSwarmEvents(): Promise<unknown[]> {
 export async function fetchSessions(): Promise<SessionSummary[]> {
   const res = await fetch(joinBaseURL("/v1/sessions"), {
     credentials: CREDENTIALS_INCLUDE,
+    cache: "no-store",
   });
   if (!res.ok) {
     throw new Error(`Failed to fetch sessions: ${res.statusText}`);
@@ -222,6 +223,8 @@ export interface SendSessionMessageQueuedResult {
   promptId: string;
   /** 1-based position inside the backend's per-session queue. */
   queuePosition: number;
+  /** The in-flight turn ID this queued prompt waits behind (from active_turn_id). */
+  activeTurnId?: string;
 }
 
 /**
@@ -272,8 +275,8 @@ export class QueuedPromptNotFoundError extends Error {
  *                pre-Phase-2 server compatibility.
  *
  * Prompt-queue (per-session queue plan, May 2026): when the session is
- * already busy the POST returns 202 with {status:"queued", session_id,
- * queuePosition, promptId} instead of minting a turn. That wire shape is
+ * already busy the POST returns 202 with {queued:true, queue_position,
+ * prompt_id, active_turn_id} instead of minting a turn. That wire shape is
  * adapted to SendSessionMessageQueuedResult so the chat store branches
  * on `result.queued` to route the prompt into the backend-owned queue.
  *
@@ -327,23 +330,32 @@ export async function sendSessionMessage(
     session_id?: string;
     queuePosition?: number;
     promptId?: string;
+    queued?: boolean;
+    queue_position?: number;
+    prompt_id?: string;
+    active_turn_id?: string;
   };
-  if (res.status === 202 && parsed.status === "queued") {
-    // Per-session prompt queue (May 2026): the session is busy, the
-    // backend accepted the prompt into its queue. Wire shape:
-    //   { status: "queued", session_id, queuePosition, promptId }
+  if (res.status === 202) {
+    // Per-session prompt queue — HTTP 202 is the queue signal. The BE is
+    // the single source of truth. The `queued` boolean has omitempty on
+    // the Go side and may be absent; the status code is authoritative.
+    // Best-effort parse of snake_case fields when present.
     return {
       queued: true,
       sessionId: typeof parsed.session_id === "string" ? parsed.session_id : sessionId,
-      promptId: typeof parsed.promptId === "string" ? parsed.promptId : "",
-      queuePosition: typeof parsed.queuePosition === "number" ? parsed.queuePosition : 1,
+      promptId:
+        typeof parsed.prompt_id === "string" ? parsed.prompt_id :
+        typeof parsed.promptId === "string" ? parsed.promptId : "",
+      queuePosition:
+        typeof parsed.queue_position === "number" ? parsed.queue_position :
+        typeof parsed.queuePosition === "number" ? parsed.queuePosition : 1,
+      activeTurnId:
+        typeof parsed.active_turn_id === "string" && parsed.active_turn_id.length > 0
+          ? parsed.active_turn_id
+          : undefined,
     };
   }
-  // A 202 that is not the queue shape is a contract violation — fall
-  // through to the normalisation below so the caller surfaces the
-  // server's body rather than silently mis-routing.
-  //
-  // Phase 2 wire shape:
+  // HTTP 200 — immediate dispatch. Phase 2 wire shape:
   //   {
   //     ...SessionResponse,        // legacy flat fields (id, agentId, messages, ...)
   //     turn_id: string,           // additive (empty string when feature off)
@@ -404,6 +416,44 @@ export async function cancelQueuedPrompt(
 }
 
 /**
+ * cancelTurn cancels an in-flight turn server-side via
+ * DELETE /api/v1/sessions/{id}/turns/{turn_id} (Session Cancel, Aug
+ * 2026). The backend registry marks the turn terminal 'cancelled' and
+ * aborts the engine run; the FE long-poll loop exits on the terminal
+ * snapshot the same way it exits on 'completed'/'failed' (any status
+ * !== 'running' is terminal), so polling stops riding the turn instead
+ * of draining to natural completion.
+ *
+ * Responses:
+ *   - 200             → the TurnState snapshot: 'cancelled' if the turn
+ *                       was running, the pre-existing terminal state if
+ *                       it had already resolved (idempotent — repeat
+ *                       cancels are safe).
+ *   - 404             → throws (unknown turn id; caller may treat as
+ *                       already-gone / skip).
+ *   - other non-2xx   → throws Error(parseError).
+ */
+export async function cancelTurn(
+  sessionId: string,
+  turnId: string,
+): Promise<TurnState> {
+  const res = await fetch(
+    joinBaseURL(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`,
+    ),
+    {
+      method: "DELETE",
+      headers: withCsrfHeader(undefined),
+      credentials: CREDENTIALS_INCLUDE,
+    },
+  );
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+  return (await res.json()) as TurnState;
+}
+
+/**
  * TurnState is the wire shape returned by
  * GET /api/v1/sessions/{session_id}/turns/{turn_id}. Mirrors the Go
  * `turnResponse` struct in internal/api/server.go.
@@ -429,7 +479,7 @@ export interface TurnStateModel {
 export interface TurnState {
   turn_id: string;
   session_id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   started_at: string;
   completed_at: string | null;
   duration_ms?: number;
@@ -566,6 +616,26 @@ export interface TurnState {
    * unchanged.
    */
   permission_requests?: TurnStatePermissionRequest[];
+  /**
+   * question_requests surfaces the in-flight + recently-resolved
+   * blocking clarifying-question requests for this Turn (Question
+   * Tool, Aug 2026 — mirrors permission_requests §17.1). Populated
+   * by the subscribeTurnQuestions bus subscribers in
+   * internal/api/server.go.
+   *
+   * Two-phase wire lifecycle:
+   *   - status === 'pending' — engine goroutine suspended in the
+   *     question tool; FE renders QuestionPrompt anchored to the
+   *     owning tool_call bubble.
+   *   - status === 'answered' | 'timeout' — resolved. All tabs
+   *     observe via the long-poll diff; chatStore removes the entry
+   *     from pendingQuestions.
+   *
+   * Optional: servers without WithQuestionRegistry and Turns with
+   * no question events omit the field entirely — the FE's diff
+   * treats absent === unchanged.
+   */
+  question_requests?: TurnStateQuestionRequest[];
 }
 
 /**
@@ -594,6 +664,17 @@ export interface TurnStatePermissionRequest {
   mode?: string;
   status: "pending" | "granted" | "denied" | "timeout";
   scope?: string;
+}
+
+export interface TurnStateQuestionRequest {
+  request_id: string;
+  tool_name: string;
+  agent_name?: string;
+  question: string;
+  options?: string[];
+  allow_multiple?: boolean;
+  status: "pending" | "answered" | "timeout";
+  answers?: string[];
 }
 
 /**
@@ -804,7 +885,7 @@ export async function fetchTurn(
     const since = Math.max(0, Math.floor(opts.since ?? 0));
     url = `${url}?wait=true&since=${since}`;
   }
-  const init: RequestInit = { credentials: CREDENTIALS_INCLUDE };
+  const init: RequestInit = { credentials: CREDENTIALS_INCLUDE, cache: "no-store" };
   if (opts.signal) {
     init.signal = opts.signal;
   }
@@ -877,6 +958,7 @@ export async function fetchSessionMessages(
     joinBaseURL(`/v1/sessions/${encodeURIComponent(sessionId)}/messages`),
     {
       credentials: CREDENTIALS_INCLUDE,
+      cache: "no-store",
     },
   );
   if (!res.ok) {
@@ -1027,6 +1109,28 @@ export async function grantPermission(
     throw new Error(await parseError(res));
   }
   return (await res.json()) as { request_id: string; scope: string };
+}
+
+export async function answerQuestion(
+  sessionId: string,
+  requestId: string,
+  answers: string[],
+): Promise<{ request_id: string; status: string }> {
+  const res = await fetch(
+    joinBaseURL(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/question-answer`,
+    ),
+    {
+      method: "POST",
+      headers: withCsrfHeader({ "Content-Type": "application/json" }),
+      credentials: CREDENTIALS_INCLUDE,
+      body: JSON.stringify({ request_id: requestId, answers }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+  return (await res.json()) as { request_id: string; status: string };
 }
 
 export async function fetchModels(): Promise<Model[]> {

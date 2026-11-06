@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useChatStore } from '@/stores/chatStore'
+import { useRouter } from 'vue-router'
 import { showToast } from '@/composables/useToast'
 import Icon from '@/components/common/Icon.vue'
 import FuzzySearchModal from '@/components/common/FuzzySearchModal.vue'
@@ -102,9 +103,27 @@ function closePalette(): void {
   isPaletteOpen.value = false
 }
 
+// Session-URI (dev-swarm-d211dd7715c1) — the URL is the source of truth
+// for the viewed session. Selection and new-session now push the route
+// instead of mutating the store directly; the store still updates, but
+// via the URL-driven binding in ChatView so the two can never diverge.
+// Composables return undefined in unit tests that mount the switcher
+// without a router plugin — the optional chaining keeps those mounts
+// working with the legacy direct-mutation behaviour.
+
+const router = useRouter() as { push: (to: string) => Promise<unknown> } | undefined
+
+function sessionRoutePath(sessionId: string): string {
+  return `/chat/s/${sessionId}`
+}
+
 async function handlePaletteSelect(item: FuzzySearchItem): Promise<void> {
-  chatStore.currentSessionId = item.id
-  await chatStore.loadSessionMessages(item.id)
+  if (router) {
+    await router.push(sessionRoutePath(item.id))
+  } else {
+    chatStore.currentSessionId = item.id
+    await chatStore.loadSessionMessages(item.id)
+  }
   isPaletteOpen.value = false
 }
 
@@ -134,6 +153,18 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
 async function createNewSession(): Promise<void> {
   await chatStore.newSession()
   chatStore.clearMessages()
+  // Session-URI: newSession() resolves only after createSession returns,
+  // so currentSessionId is the fresh backend id here. Land the URL on
+  // /chat/s/<id> immediately — the old router.push('/chat') clobbered
+  // ChatView's store→route sync watcher and left the URL on bare /chat.
+  // The null branch only covers mocked/unit environments where the store
+  // action is stubbed without setting an id.
+  const newId = chatStore.currentSessionId
+  if (router && newId) {
+    await router.push(sessionRoutePath(newId))
+  } else if (router) {
+    await router.push('/chat')
+  }
   isOpen.value = false
 }
 
@@ -158,8 +189,12 @@ onBeforeUnmount(() => {
 })
 
 async function selectSession(sessionId: string): Promise<void> {
-  chatStore.currentSessionId = sessionId
-  await chatStore.loadSessionMessages(sessionId)
+  if (router) {
+    await router.push(sessionRoutePath(sessionId))
+  } else {
+    chatStore.currentSessionId = sessionId
+    await chatStore.loadSessionMessages(sessionId)
+  }
   isOpen.value = false
 }
 

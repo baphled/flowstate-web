@@ -1,9 +1,11 @@
 import BashTool from '@/components/tools/BashTool.vue'
 import CompactStatusTool from '@/components/tools/CompactStatusTool.vue'
+import ExecTool from '@/components/tools/ExecTool.vue'
 import EditTool from '@/components/tools/EditTool.vue'
 import GenericTool from '@/components/tools/GenericTool.vue'
 import GlobTool from '@/components/tools/GlobTool.vue'
 import GrepTool from '@/components/tools/GrepTool.vue'
+import QuestionTool from '@/components/tools/QuestionTool.vue'
 import ReadTool from '@/components/tools/ReadTool.vue'
 import SkillLoadTool from '@/components/tools/SkillLoadTool.vue'
 import TodoTool from '@/components/tools/TodoTool.vue'
@@ -21,6 +23,7 @@ function registerIfNeeded(name: string, component: Component): void {
 
 export function registerTools(): void {
   registerIfNeeded('bash', BashTool)
+  registerIfNeeded('exec', ExecTool)
   registerIfNeeded('read', ReadTool)
   registerIfNeeded('write', WriteTool)
   registerIfNeeded('edit', EditTool)
@@ -33,6 +36,14 @@ export function registerTools(): void {
   registerIfNeeded('webfetch', CompactStatusTool)
   registerIfNeeded('websearch', CompactStatusTool)
   registerIfNeeded('task', GenericTool)
+  // Question Tool (Aug 2026) — dedicated renderer so a `question`
+  // tool_call never silently falls through to GenericTool when the
+  // pending-question pipeline is starved (backend regression, pre-
+  // Aug-2026 server omitting question_requests, or a tool_name
+  // mismatch). See QuestionTool.vue for the two failure modes this
+  // guards against. The inline QuestionPrompt (MessageBubble) still
+  // owns the interaction when a pending entry matches.
+  registerIfNeeded('question', QuestionTool)
   // Todo + compact-status renderers — see TodoTool.vue / CompactStatusTool.vue
   // for the per-tool rendering rules. Compact-status tool names map to the
   // Go side at internal/recall/query_tools.go (search_context, get_messages,
