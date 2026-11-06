@@ -20,7 +20,7 @@
     ],
     "scope-enum": [
       2,
-      0,
+      "always",
       [
         "web",
         "api",
@@ -37,13 +37,16 @@
         "build",
         "perf",
         "a11y",
-        "router"
+        "router",
+        "tools",
+        "markdown",
+        "notifications"
       ]
     ],
     "scope-empty": [1, "never"],
-    "subject-case": [2, "always", "lower-case"],
+    "subject-case": [1, "always", "lower-case"],
     "subject-empty": [2, "never"],
-    "subject-max-length": [2, "always", 72],
+    "subject-max-length": [2, "always", 100],
     "header-max-length": [2, "always", 100],
     "body-max-line-length": [2, "always", 200],
     "footer-max-line-length": [2, "always", 200]
